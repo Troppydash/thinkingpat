@@ -1,3 +1,4 @@
+mod game;
 mod group;
 
 fn main() {
