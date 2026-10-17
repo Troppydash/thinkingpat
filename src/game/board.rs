@@ -2,7 +2,7 @@ use std::ops::{Neg, Not};
 
 use rand::{RngExt, seq::index};
 
-use crate::game::card::Card;
+use crate::game::{card::Card, showdown};
 
 pub const PRESAMPLED_SIZE: usize = 2 + 2 + 5;
 pub const CASH_IN_SB: i32 = 1000;
@@ -167,7 +167,11 @@ impl Board {
     }
 
     fn showdown(&self) -> Option<Player> {
-        None
+        showdown::winner(
+            &self.presampled[0..2],
+            &self.presampled[2..4],
+            &self.presampled[4..],
+        )
     }
 
     pub fn play(&mut self, action: Action) {
