@@ -1,5 +1,7 @@
 ### Limit Rules
-- who goes first: always sb
+- who goes first: 
+    - preflop: sb
+    - flop/turn/river, bb
 - can: call (0 or match), raise (>0), fold
 - raise
     - preflop/flop, increments of 1bb
