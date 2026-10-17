@@ -1,3 +1,3 @@
-mod board;
-mod card;
-mod showdown;
+pub mod board;
+pub mod card;
+pub mod showdown;
