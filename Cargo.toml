@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 fxhash = "0.2.1"
 rand = "0.10.3"
+usearch = "2.26.4"

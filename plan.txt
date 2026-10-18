@@ -1,0 +1,4 @@
+implement board (done)
+implement index
+implement equity group
+implement mccfr

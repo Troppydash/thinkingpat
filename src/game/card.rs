@@ -1,3 +1,5 @@
+use rand::rngs::ThreadRng;
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Rank {
     Two,
@@ -47,17 +49,23 @@ impl Suit {
     pub const ALL: [Suit; Self::COUNT] = [Suit::Heart, Suit::Diamond, Suit::Spade, Suit::Club];
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-pub struct Card {
-    pub suit: Suit,
-    pub rank: Rank,
-}
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub struct Card(u64);
 
 impl Card {
-    pub const DEFAULT: Self = Self {
-        suit: Suit::Heart,
-        rank: Rank::Three,
-    };
+    pub const DEFAULT: Self = Self(0);
+
+    pub const fn new(suit: Suit, rank: Rank) -> Self {
+        Self(suit as u64 + ((rank as u64) << 2))
+    }
+
+    pub const fn suit(&self) -> Suit {
+        Suit::ALL[(self.0 & 0b11) as usize]
+    }
+
+    pub const fn rank(&self) -> Rank {
+        Rank::ALL[(self.0 >> 2) as usize]
+    }
 
     pub const COUNT: usize = Suit::COUNT * Rank::COUNT;
     pub const ALL: [Card; Self::COUNT] = {
@@ -67,10 +75,7 @@ impl Card {
         while suit < Suit::COUNT {
             let mut rank = 0;
             while rank < Rank::COUNT {
-                out[i] = Card {
-                    suit: Suit::ALL[suit],
-                    rank: Rank::ALL[rank],
-                };
+                out[i] = Card::new(Suit::ALL[suit], Rank::ALL[rank]);
                 i += 1;
                 rank += 1;
             }
@@ -104,11 +109,15 @@ impl Card {
             b'c' => Suit::Club,
             _ => panic!("invalid suit: {text}"),
         };
-        Card { rank, suit }
+        Card::new(suit, rank)
     }
 
     pub fn parse_cards(text: &str) -> Vec<Card> {
         let cards: Vec<_> = text.split_whitespace().map(Card::parse_card).collect();
         cards
+    }
+
+    fn sample_remain(cards: &[Card], rng: &ThreadRng, n: usize) -> Vec<Card> {
+        unimplemented!()
     }
 }

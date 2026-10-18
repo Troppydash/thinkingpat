@@ -1,5 +1,3 @@
-// lossless indexing
-
 use std::cmp::Reverse;
 
 use fxhash::FxHashMap;
@@ -103,8 +101,8 @@ impl Group for SuitIndex {
         // group by suit sort by count
         let mut suit = [0u16; Suit::COUNT];
         for card in cards {
-            let mask = &mut suit[card.suit as usize];
-            let bit = 1 << (card.rank as usize);
+            let mask = &mut suit[card.suit() as usize];
+            let bit = 1 << (card.rank() as usize);
             debug_assert_eq!(*mask & bit, 0, "duplicate card");
             *mask |= bit;
         }
@@ -186,7 +184,7 @@ mod tests {
                 if hand.len() == index.cards {
                     let mut canonical = [0u16; Suit::COUNT];
                     for card in hand.iter() {
-                        canonical[card.suit as usize] |= 1 << card.rank as usize;
+                        canonical[card.suit() as usize] |= 1 << card.rank() as usize;
                     }
                     canonical.sort_unstable();
                     let slot = &mut seen[index.map(hand)];
@@ -229,9 +227,11 @@ mod tests {
                             let mapped: Vec<_> = hand
                                 .iter()
                                 .rev()
-                                .map(|card| Card {
-                                    rank: card.rank,
-                                    suit: Suit::ALL[permutation[card.suit as usize]],
+                                .map(|card| {
+                                    Card::new(
+                                        Suit::ALL[permutation[card.suit() as usize]],
+                                        card.rank(),
+                                    )
                                 })
                                 .collect();
                             assert_eq!(index.map(&mapped), expected);

@@ -50,9 +50,9 @@ fn evaluate(hole: &[Card], community: &[Card]) -> [u8; 6] {
     let mut suits = [0u16; 4];
     let mut ranks = 0u16;
     for card in hole.iter().chain(community) {
-        let rank = card.rank as usize;
+        let rank = card.rank() as usize;
         counts[rank] += 1;
-        suits[card.suit as usize] |= 1 << rank;
+        suits[card.suit() as usize] |= 1 << rank;
         ranks |= 1 << rank;
     }
 
