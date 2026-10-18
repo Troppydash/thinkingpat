@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn river_all_in_call_resolves_the_entire_pot() {
         let mut board = street_board(Street::River);
-        board.presampled = Card::parse_cards("Ah Ad Kh Kd 2s 4c 7h 9d Js");
+        board.presampled = Card::parse_cards("Ah Ad Kh Kd 2s 4c 7h 9d Js").try_into().unwrap();
         board.cash_in_sb = [2, 0];
         board.pot_in_sb = CASH_IN_SB * 2 - 2;
         board.raises_this_street_in_sb = [0, BB_IN_SB];
@@ -477,7 +477,7 @@ mod tests {
             ("2h 3d 4h 5d As Ks Qs Js Ts", [0, 0]),
         ] {
             let mut board = street_board(Street::River);
-            board.presampled = Card::parse_cards(cards);
+            board.presampled = Card::parse_cards(cards).try_into().unwrap();
             board.cash_in_sb = [CASH_IN_SB - 10; Player::COUNT];
             board.pot_in_sb = 20;
             board.play(Action::Call);
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn a_checked_down_hand_returns_the_losers_full_contribution() {
         let mut board = Board::new();
-        board.presampled = Card::parse_cards("Ah Ad Kh Kd 2s 4c 7h 9d Js");
+        board.presampled = Card::parse_cards("Ah Ad Kh Kd 2s 4c 7h 9d Js").try_into().unwrap();
         for _ in 0..8 {
             board.play(Action::Call);
         }
@@ -551,7 +551,7 @@ mod tests {
             ("2h 3d 4h 5d As Ks Qs Js Ts", [0, 0]),
         ] {
             let mut board = Board::new();
-            board.presampled = Card::parse_cards(cards);
+            board.presampled = Card::parse_cards(cards).try_into().unwrap();
             for (street, actions) in [
                 (
                     Street::Preflop,
@@ -590,7 +590,7 @@ mod tests {
     fn matched_all_in_before_river_runs_out_the_board() {
         for street in [Street::Flop, Street::Turn] {
             let mut board = street_board(street);
-            board.presampled = Card::parse_cards("Ah Ad Kh Kd 2s 4c 7h 9d Js");
+            board.presampled = Card::parse_cards("Ah Ad Kh Kd 2s 4c 7h 9d Js").try_into().unwrap();
             let amount = board.raise_amount();
             board.cash_in_sb = [amount; Player::COUNT];
             board.pot_in_sb = CASH_IN_SB * 2 - amount * 2;

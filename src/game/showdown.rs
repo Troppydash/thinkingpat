@@ -124,7 +124,7 @@ mod tests {
         ];
         let mut previous = None;
         for (text, expected) in cases {
-            let cards = Card::parse_cards::<7>(text);
+            let cards = Card::parse_cards(text);
             let value = evaluate(&cards[..2], &cards[2..]);
             assert_eq!(value, expected, "{text}");
             if let Some(previous) = previous {
@@ -150,7 +150,7 @@ mod tests {
             ("As 2d 3h 4c 6s 9d Tc", [0, 12, 8, 7, 4, 2]),
             ("As Kd Qh Jc 2s 5d 3c", [0, 12, 11, 10, 9, 3]),
         ] {
-            let cards = Card::parse_cards::<7>(text);
+            let cards = Card::parse_cards(text);
             assert_eq!(evaluate(&cards[..2], &cards[2..]), expected, "{text}");
         }
     }
@@ -177,7 +177,7 @@ mod tests {
             "9h 2d 4h 3d 5h 6h 7h 8h Ks",
             "Kh 2d Qh 3d As 9c 7h 4d 2s",
         ] {
-            let mut cards = Card::parse_cards::<9>(text);
+            let mut cards = Card::parse_cards(text);
             assert_eq!(
                 winner(&cards[..2], &cards[2..4], &cards[4..]),
                 Some(Player::BB),
@@ -203,7 +203,7 @@ mod tests {
             "2h 3d 4h 5d As Ac Ah Ks Kc",
             "Ah 2d Ac 3d Ks Qc Jh Td 9s",
         ] {
-            let cards = Card::parse_cards::<9>(text);
+            let cards = Card::parse_cards(text);
             assert_eq!(
                 winner(&cards[..2], &cards[2..4], &cards[4..]),
                 None,

@@ -107,8 +107,8 @@ impl Card {
         Card { rank, suit }
     }
 
-    pub fn parse_cards<const N: usize>(text: &str) -> [Card; N] {
+    pub fn parse_cards(text: &str) -> Vec<Card> {
         let cards: Vec<_> = text.split_whitespace().map(Card::parse_card).collect();
-        cards.try_into().unwrap()
+        cards
     }
 }
