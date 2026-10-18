@@ -3,7 +3,7 @@ use std::{
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
 };
 
-use rand::{RngExt, rngs::ThreadRng, seq::index};
+use rand::{Rng, RngExt, rngs::ThreadRng, seq::index};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Rank {
@@ -126,7 +126,7 @@ impl Card {
 
 #[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy)]
 #[repr(transparent)]
-pub struct CardSet(u64);
+pub struct CardSet(pub u64);
 
 impl CardSet {
     pub const EMPTY: Self = Self(0);
@@ -184,26 +184,16 @@ impl CardSet {
     }
 
     /// Gather this suit's interleaved bits into a 13-bit rank mask.
+    #[cfg(target_feature = "bmi2")]
     #[inline]
-    pub fn suit_ranks(self, suit: Suit) -> u16 {
-        #[cfg(target_arch = "x86_64")]
-        if std::is_x86_feature_detected!("bmi2") {
-            return unsafe { self.suit_ranks_bmi2(suit) };
-        }
-
-        self.suit_ranks_portable(suit)
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[inline]
-    #[target_feature(enable = "bmi2")]
-    unsafe fn suit_ranks_bmi2(self, suit: Suit) -> u16 {
+    pub unsafe fn suit_ranks(self, suit: Suit) -> u16 {
         let mask = 0x0001_1111_1111_1111u64 << suit as u32;
         std::arch::x86_64::_pext_u64(self.0, mask) as u16
     }
 
+    #[cfg(not(target_feature = "bmi2"))]
     #[inline]
-    const fn suit_ranks_portable(self, suit: Suit) -> u16 {
+    pub const fn suit_ranks(self, suit: Suit) -> u16 {
         let mut bits = (self.0 >> suit as u32) & 0x0001_1111_1111_1111;
         // i don't understand this bitmask LLM magic but the bmi2 version is easier anyways
         bits = (bits | (bits >> 3)) & 0x0303_0303_0303_0303;
@@ -225,7 +215,7 @@ impl CardSet {
         Self::sample_remain(CardSet::EMPTY, rng, n)
     }
 
-    pub fn sample_remain(cards: CardSet, rng: &mut ThreadRng, n: usize) -> CardSet {
+    pub fn sample_remain<R: Rng>(cards: CardSet, rng: &mut R, n: usize) -> CardSet {
         let mut i = 0;
         let mut selected = CardSet::EMPTY;
         while i < n {
@@ -240,7 +230,7 @@ impl CardSet {
         selected
     }
 
-    pub fn sample_remain_ordered<const N: usize>(cards: CardSet, rng: &mut ThreadRng) -> [Card; N] {
+    pub fn sample_remain_ordered<const N: usize, R: Rng>(cards: CardSet, rng: &mut R) -> [Card; N] {
         let mut out = [Card::DEFAULT; N];
         let mut i = 0;
         let mut found = cards;
@@ -391,7 +381,6 @@ mod tests {
                         cards.insert(Card::new(suit, rank));
                     }
                 }
-                assert_eq!(cards.suit_ranks_portable(suit), ranks);
                 assert_eq!(cards.suit_ranks(suit), ranks);
             }
         }

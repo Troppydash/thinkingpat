@@ -12,18 +12,6 @@ pub const CASH_IN_SB: i32 = 1000;
 pub const BB_IN_SB: i32 = 2;
 pub const MAX_RAISES_PER_STREET: i32 = 3;
 
-fn presample() -> [Card; PRESAMPLED_SIZE] {
-    let mut rng = rand::rng();
-    let mut cards = [Card::DEFAULT; PRESAMPLED_SIZE];
-    let mut i = 0;
-    for idx in index::sample(&mut rng, Card::COUNT, PRESAMPLED_SIZE) {
-        cards[i] = Card::ALL[idx];
-        i += 1;
-    }
-
-    cards
-}
-
 fn make_oppsite<T>(score: T, side: Player) -> [T; Player::COUNT]
 where
     T: Neg<Output = T> + Copy,
@@ -80,10 +68,11 @@ pub struct CardState<Community = [Card; 5]> {
 
 impl CardState {
     fn new() -> Self {
+        // TODO: make this a seeded rng for reprod
         let mut rng = rand::rng();
         let p0 = CardSet::sample(&mut rng, 2);
         let p1 = CardSet::sample_remain(p0, &mut rng, 2);
-        let community = CardSet::sample_remain_ordered::<5>(p0 | p1, &mut rng);
+        let community = CardSet::sample_remain_ordered::<5, ThreadRng>(p0 | p1, &mut rng);
         Self {
             hands: [p0, p1],
             community,
