@@ -1,8 +1,6 @@
-use std::hash::Hash;
-
-use crate::game::card::Card;
+use crate::game::card::CardSet;
 
 pub trait Group {
-    fn map(&self, cards: &[Card]) -> usize;
+    fn map(&self, cards: CardSet) -> usize;
     fn size(&self) -> usize;
 }

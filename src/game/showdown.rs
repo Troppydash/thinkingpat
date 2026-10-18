@@ -1,10 +1,10 @@
 use std::cmp::Ordering;
 
 use super::board::Player;
-use super::card::{Card, Rank};
+use super::card::{CardSet, Suit};
 
-pub fn winner(bb: &[Card], sb: &[Card], community: &[Card]) -> Option<Player> {
-    match evaluate(bb, community).cmp(&evaluate(sb, community)) {
+pub fn winner(bb: CardSet, sb: CardSet, community: CardSet) -> Option<Player> {
+    match evaluate(bb | community).cmp(&evaluate(sb | community)) {
         Ordering::Greater => Some(Player::BB),
         Ordering::Less => Some(Player::SB),
         Ordering::Equal => None,
@@ -45,36 +45,30 @@ fn kickers(mut value: [u8; 6], mut mask: u16, slots: std::ops::Range<usize>) -> 
 }
 
 // [category, high card, kickers...]
-fn evaluate(hole: &[Card], community: &[Card]) -> [u8; 6] {
-    let mut counts = [0u8; 13];
-    let mut suits = [0u16; 4];
-    let mut ranks = 0u16;
-    for card in hole.iter().chain(community) {
-        let rank = card.rank() as usize;
-        counts[rank] += 1;
-        suits[card.suit() as usize] |= 1 << rank;
-        ranks |= 1 << rank;
-    }
+fn evaluate(cards: CardSet) -> [u8; 6] {
+    let suits = Suit::ALL.map(|suit| cards.suit_ranks(suit));
+    let ranks = suits.into_iter().fold(0, |ranks, suit| ranks | suit);
 
     let flush = suits.into_iter().find(|mask| mask.count_ones() >= 5);
     if let Some(high) = flush.and_then(straight_high) {
         return [STRAIGHT_FLUSH, high, 0, 0, 0, 0];
     }
 
-    let mut quads = None;
-    let mut trips = None;
+    let [a, b, c, d] = suits;
+    let quad_mask = a & b & c & d;
+    let trip_mask = (a & b & (c | d)) | (c & d & (a | b));
+    let mut pair_mask = (a & b) | (c & d) | ((a | b) & (c | d));
+    let quads = (quad_mask != 0).then(|| quad_mask.ilog2() as u8);
+    let trips = (trip_mask != 0).then(|| trip_mask.ilog2() as u8);
+    // need to remove the trip in pairs for full house
+    if let Some(rank) = trips {
+        pair_mask &= !(1 << rank);
+    }
     let mut pairs = [0u8; 3];
-    let mut pair_count = 0;
-    for rank in (0..13).rev() {
-        match counts[rank] {
-            4 => quads = Some(rank as u8),
-            3 if trips.is_none() => trips = Some(rank as u8),
-            2 | 3 => {
-                pairs[pair_count] = rank as u8;
-                pair_count += 1;
-            }
-            _ => {}
-        }
+    let pair_count = pair_mask.count_ones() as usize;
+    for pair in &mut pairs[..pair_count] {
+        *pair = pair_mask.ilog2() as u8;
+        pair_mask &= !(1 << *pair);
     }
 
     if let Some(rank) = quads {
@@ -108,6 +102,7 @@ fn evaluate(hole: &[Card], community: &[Card]) -> [u8; 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::card::Card;
 
     #[test]
     fn evaluates_every_hand_category() {
@@ -125,7 +120,7 @@ mod tests {
         let mut previous = None;
         for (text, expected) in cases {
             let cards = Card::parse_cards(text);
-            let value = evaluate(&cards[..2], &cards[2..]);
+            let value = evaluate(cards.into_iter().collect());
             assert_eq!(value, expected, "{text}");
             if let Some(previous) = previous {
                 assert!(value > previous, "{text}");
@@ -151,7 +146,7 @@ mod tests {
             ("As Kd Qh Jc 2s 5d 3c", [0, 12, 11, 10, 9, 3]),
         ] {
             let cards = Card::parse_cards(text);
-            assert_eq!(evaluate(&cards[..2], &cards[2..]), expected, "{text}");
+            assert_eq!(evaluate(cards.into_iter().collect()), expected, "{text}");
         }
     }
 
@@ -179,14 +174,22 @@ mod tests {
         ] {
             let mut cards = Card::parse_cards(text);
             assert_eq!(
-                winner(&cards[..2], &cards[2..4], &cards[4..]),
+                winner(
+                    cards[..2].iter().copied().collect(),
+                    cards[2..4].iter().copied().collect(),
+                    cards[4..].iter().copied().collect(),
+                ),
                 Some(Player::BB),
                 "{text}"
             );
             cards.swap(0, 2);
             cards.swap(1, 3);
             assert_eq!(
-                winner(&cards[..2], &cards[2..4], &cards[4..]),
+                winner(
+                    cards[..2].iter().copied().collect(),
+                    cards[2..4].iter().copied().collect(),
+                    cards[4..].iter().copied().collect(),
+                ),
                 Some(Player::SB),
                 "swapped {text}"
             );
@@ -205,7 +208,11 @@ mod tests {
         ] {
             let cards = Card::parse_cards(text);
             assert_eq!(
-                winner(&cards[..2], &cards[2..4], &cards[4..]),
+                winner(
+                    cards[..2].iter().copied().collect(),
+                    cards[2..4].iter().copied().collect(),
+                    cards[4..].iter().copied().collect(),
+                ),
                 None,
                 "{text}"
             );

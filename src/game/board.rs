@@ -1,8 +1,11 @@
 use std::ops::{Neg, Not};
 
-use rand::{RngExt, seq::index};
+use rand::{rngs::ThreadRng, seq::index};
 
-use crate::game::{card::Card, showdown};
+use crate::game::{
+    card::{Card, CardSet},
+    showdown,
+};
 
 pub const PRESAMPLED_SIZE: usize = 2 + 2 + 5;
 pub const CASH_IN_SB: i32 = 1000;
@@ -70,9 +73,22 @@ impl Not for Player {
     }
 }
 
-pub struct CardState {
-    hands: [Vec<Card>; Player::COUNT],
-    community: Vec<Card>,
+pub struct CardState<Community = [Card; 5]> {
+    hands: [CardSet; Player::COUNT],
+    community: Community,
+}
+
+impl CardState {
+    fn new() -> Self {
+        let mut rng = rand::rng();
+        let p0 = CardSet::sample(&mut rng, 2);
+        let p1 = CardSet::sample_remain(p0, &mut rng, 2);
+        let community = CardSet::sample_remain_ordered::<5>(p0 | p1, &mut rng);
+        Self {
+            hands: [p0, p1],
+            community,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -90,7 +106,7 @@ pub enum Outcome {
 }
 
 pub struct Board {
-    presampled: [Card; PRESAMPLED_SIZE],
+    presampled: CardState,
     street: Street,
     stm: Player,
     cash_in_sb: [i32; Player::COUNT],
@@ -116,7 +132,7 @@ impl Board {
         raises_this_street_in_sb[Player::BB as usize] = BB_IN_SB;
 
         Self {
-            presampled: presample(),
+            presampled: CardState::new(),
             street: Street::Preflop,
             stm: Player::SB,
             cash_in_sb,
@@ -128,19 +144,17 @@ impl Board {
         }
     }
 
-    pub fn card_state(&self) -> CardState {
-        let community_end = 4 + match self.street {
+    pub fn card_state(&self) -> CardState<&[Card]> {
+        let community_end = match self.street {
             Street::Preflop => 0,
             Street::Flop => 3,
             Street::Turn => 4,
             Street::River => 5,
         };
+
         CardState {
-            hands: [
-                self.presampled[0..2].to_owned(),
-                self.presampled[2..4].to_owned(),
-            ],
-            community: self.presampled[4..community_end].to_owned(),
+            hands: self.presampled.hands,
+            community: &self.presampled.community[..community_end],
         }
     }
 
@@ -173,9 +187,9 @@ impl Board {
 
     fn showdown(&self) -> Option<Player> {
         showdown::winner(
-            &self.presampled[0..2],
-            &self.presampled[2..4],
-            &self.presampled[4..],
+            self.presampled.hands[Player::BB as usize],
+            self.presampled.hands[Player::SB as usize],
+            self.presampled.community.iter().copied().collect(),
         )
     }
 
@@ -266,6 +280,18 @@ impl Board {
 mod tests {
     use super::*;
 
+    fn parse_card_state(text: &str) -> CardState {
+        let cards = Card::parse_cards(text);
+        assert_eq!(cards.len(), PRESAMPLED_SIZE);
+        CardState {
+            hands: [
+                cards[..2].iter().copied().collect(),
+                cards[2..4].iter().copied().collect(),
+            ],
+            community: cards[4..].try_into().unwrap(),
+        }
+    }
+
     fn street_board(street: Street) -> Board {
         if street == Street::Preflop {
             return Board::new();
@@ -296,9 +322,15 @@ mod tests {
         assert_eq!(board.cash_in_sb, [CASH_IN_SB - 2, CASH_IN_SB - 1]);
         assert_eq!(board.pot_in_sb, 3);
         assert_eq!(board.outcome(), Outcome::Ongoing);
-        for (i, card) in board.presampled.iter().enumerate() {
-            assert!(!board.presampled[..i].contains(card));
+        let [bb, sb] = board.presampled.hands;
+        assert_eq!(bb.len(), 2);
+        assert_eq!(sb.len(), 2);
+        assert!(bb.is_disjoint(sb));
+        let mut seen = bb | sb;
+        for card in board.presampled.community {
+            assert!(seen.insert(card), "duplicate dealt card: {card:?}");
         }
+        assert_eq!(seen.len(), PRESAMPLED_SIZE);
         assert_chips_conserved(&board);
     }
 
@@ -313,9 +345,9 @@ mod tests {
         ] {
             board.street = street;
             let state = board.card_state();
-            assert_eq!(state.hands[Player::BB as usize], board.presampled[..2]);
-            assert_eq!(state.hands[Player::SB as usize], board.presampled[2..4]);
-            assert_eq!(state.community, board.presampled[4..4 + count]);
+            assert_eq!(state.hands, board.presampled.hands);
+            assert_eq!(state.community.len(), count);
+            assert_eq!(state.community, &board.presampled.community[..count]);
         }
     }
 
@@ -439,7 +471,7 @@ mod tests {
     #[test]
     fn river_all_in_call_resolves_the_entire_pot() {
         let mut board = street_board(Street::River);
-        board.presampled = Card::parse_cards("Ah Ad Kh Kd 2s 4c 7h 9d Js").try_into().unwrap();
+        board.presampled = parse_card_state("Ah Ad Kh Kd 2s 4c 7h 9d Js");
         board.cash_in_sb = [2, 0];
         board.pot_in_sb = CASH_IN_SB * 2 - 2;
         board.raises_this_street_in_sb = [0, BB_IN_SB];
@@ -477,7 +509,7 @@ mod tests {
             ("2h 3d 4h 5d As Ks Qs Js Ts", [0, 0]),
         ] {
             let mut board = street_board(Street::River);
-            board.presampled = Card::parse_cards(cards).try_into().unwrap();
+            board.presampled = parse_card_state(cards);
             board.cash_in_sb = [CASH_IN_SB - 10; Player::COUNT];
             board.pot_in_sb = 20;
             board.play(Action::Call);
@@ -491,7 +523,7 @@ mod tests {
     #[test]
     fn a_checked_down_hand_returns_the_losers_full_contribution() {
         let mut board = Board::new();
-        board.presampled = Card::parse_cards("Ah Ad Kh Kd 2s 4c 7h 9d Js").try_into().unwrap();
+        board.presampled = parse_card_state("Ah Ad Kh Kd 2s 4c 7h 9d Js");
         for _ in 0..8 {
             board.play(Action::Call);
         }
@@ -551,7 +583,7 @@ mod tests {
             ("2h 3d 4h 5d As Ks Qs Js Ts", [0, 0]),
         ] {
             let mut board = Board::new();
-            board.presampled = Card::parse_cards(cards).try_into().unwrap();
+            board.presampled = parse_card_state(cards);
             for (street, actions) in [
                 (
                     Street::Preflop,
@@ -590,7 +622,7 @@ mod tests {
     fn matched_all_in_before_river_runs_out_the_board() {
         for street in [Street::Flop, Street::Turn] {
             let mut board = street_board(street);
-            board.presampled = Card::parse_cards("Ah Ad Kh Kd 2s 4c 7h 9d Js").try_into().unwrap();
+            board.presampled = parse_card_state("Ah Ad Kh Kd 2s 4c 7h 9d Js");
             let amount = board.raise_amount();
             board.cash_in_sb = [amount; Player::COUNT];
             board.pot_in_sb = CASH_IN_SB * 2 - amount * 2;

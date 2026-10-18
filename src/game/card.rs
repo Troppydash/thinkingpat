@@ -1,4 +1,9 @@
-use rand::rngs::ThreadRng;
+use std::{
+    iter::FusedIterator,
+    ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
+};
+
+use rand::{RngExt, rngs::ThreadRng, seq::index};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Rank {
@@ -50,13 +55,14 @@ impl Suit {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct Card(u64);
+#[repr(transparent)]
+pub struct Card(pub u32);
 
 impl Card {
     pub const DEFAULT: Self = Self(0);
 
     pub const fn new(suit: Suit, rank: Rank) -> Self {
-        Self(suit as u64 + ((rank as u64) << 2))
+        Self(suit as u32 + ((rank as u32) << 2))
     }
 
     pub const fn suit(&self) -> Suit {
@@ -116,8 +122,350 @@ impl Card {
         let cards: Vec<_> = text.split_whitespace().map(Card::parse_card).collect();
         cards
     }
+}
 
-    fn sample_remain(cards: &[Card], rng: &ThreadRng, n: usize) -> Vec<Card> {
-        unimplemented!()
+#[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy)]
+#[repr(transparent)]
+pub struct CardSet(u64);
+
+impl CardSet {
+    pub const EMPTY: Self = Self(0);
+    pub const FULL: Self = Self((1u64 << Card::COUNT) - 1);
+
+    #[inline]
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits & Self::FULL.0)
+    }
+
+    #[inline]
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    #[inline]
+    pub const fn contains(self, card: Card) -> bool {
+        self.0 & (1u64 << card.0) != 0
+    }
+
+    #[inline]
+    pub const fn is_disjoint(self, other: Self) -> bool {
+        self.0 & other.0 == 0
+    }
+
+    #[inline]
+    pub const fn is_subset(self, other: Self) -> bool {
+        self.0 & other.0 == self.0
+    }
+
+    #[inline]
+    pub fn insert(&mut self, card: Card) -> bool {
+        let bit = 1u64 << card.0;
+        let added = self.0 & bit == 0;
+        self.0 |= bit;
+        added
+    }
+
+    #[inline]
+    pub fn remove(&mut self, card: Card) -> bool {
+        let bit = 1u64 << card.0;
+        let removed = self.0 & bit != 0;
+        self.0 &= !bit;
+        removed
+    }
+
+    /// Gather this suit's interleaved bits into a 13-bit rank mask.
+    #[inline]
+    pub fn suit_ranks(self, suit: Suit) -> u16 {
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("bmi2") {
+            return unsafe { self.suit_ranks_bmi2(suit) };
+        }
+
+        self.suit_ranks_portable(suit)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline]
+    #[target_feature(enable = "bmi2")]
+    unsafe fn suit_ranks_bmi2(self, suit: Suit) -> u16 {
+        let mask = 0x0001_1111_1111_1111u64 << suit as u32;
+        std::arch::x86_64::_pext_u64(self.0, mask) as u16
+    }
+
+    #[inline]
+    const fn suit_ranks_portable(self, suit: Suit) -> u16 {
+        let mut bits = (self.0 >> suit as u32) & 0x0001_1111_1111_1111;
+        // i don't understand this bitmask LLM magic but the bmi2 version is easier anyways
+        bits = (bits | (bits >> 3)) & 0x0303_0303_0303_0303;
+        bits = (bits | (bits >> 6)) & 0x000f_000f_000f_000f;
+        bits = (bits | (bits >> 12)) & 0x0000_00ff_0000_00ff;
+        (bits | (bits >> 24)) as u16
+    }
+
+    #[inline]
+    pub fn iter(self) -> CardSetIter {
+        CardSetIter(self.0)
+    }
+
+    pub fn parse(text: &str) -> Self {
+        text.split_whitespace().map(Card::parse_card).collect()
+    }
+
+    pub fn sample(rng: &mut ThreadRng, n: usize) -> CardSet {
+        Self::sample_remain(CardSet::EMPTY, rng, n)
+    }
+
+    pub fn sample_remain(cards: CardSet, rng: &mut ThreadRng, n: usize) -> CardSet {
+        let mut i = 0;
+        let mut selected = CardSet::EMPTY;
+        while i < n {
+            let card = Card(rng.random_range(0..Card::COUNT) as u32);
+            if (selected | cards).contains(card) {
+                continue;
+            }
+            selected.insert(card);
+            i += 1;
+        }
+
+        selected
+    }
+
+    pub fn sample_remain_ordered<const N: usize>(cards: CardSet, rng: &mut ThreadRng) -> [Card; N] {
+        let mut out = [Card::DEFAULT; N];
+        let mut i = 0;
+        let mut found = cards;
+        while i < N {
+            let card = Card(rng.random_range(0..Card::COUNT) as u32);
+            if found.contains(card) {
+                continue;
+            }
+            found.insert(card);
+            out[i] = card;
+            i += 1;
+        }
+
+        out
+    }
+}
+
+impl From<Card> for CardSet {
+    #[inline]
+    fn from(card: Card) -> Self {
+        Self(1u64 << card.0)
+    }
+}
+
+impl<const N: usize> From<[Card; N]> for CardSet {
+    fn from(cards: [Card; N]) -> Self {
+        cards.into_iter().collect()
+    }
+}
+
+impl FromIterator<Card> for CardSet {
+    fn from_iter<T: IntoIterator<Item = Card>>(cards: T) -> Self {
+        let mut set = Self::EMPTY;
+        set.extend(cards);
+        set
+    }
+}
+
+impl Extend<Card> for CardSet {
+    fn extend<T: IntoIterator<Item = Card>>(&mut self, cards: T) {
+        for card in cards {
+            self.insert(card);
+        }
+    }
+}
+
+macro_rules! bit_op {
+    ($trait:ident, $method:ident, $assign:ident, $assign_method:ident, $op:tt) => {
+        impl $trait for CardSet {
+            type Output = Self;
+            #[inline]
+            fn $method(self, rhs: Self) -> Self { Self(self.0 $op rhs.0) }
+        }
+        impl $assign for CardSet {
+            #[inline]
+            fn $assign_method(&mut self, rhs: Self) { *self = *self $op rhs; }
+        }
+    };
+}
+bit_op!(BitOr, bitor, BitOrAssign, bitor_assign, |);
+bit_op!(BitAnd, bitand, BitAndAssign, bitand_assign, &);
+bit_op!(BitXor, bitxor, BitXorAssign, bitxor_assign, ^);
+
+impl Not for CardSet {
+    type Output = Self;
+    #[inline]
+    fn not(self) -> Self {
+        Self(self.0 ^ Self::FULL.0)
+    }
+}
+
+impl Sub for CardSet {
+    type Output = Self;
+    #[inline]
+    fn sub(self, rhs: Self) -> Self {
+        Self(self.0 & !rhs.0)
+    }
+}
+
+impl SubAssign for CardSet {
+    #[inline]
+    fn sub_assign(&mut self, rhs: Self) {
+        self.0 &= !rhs.0;
+    }
+}
+
+/// Visits only set bits, in ascending card order, without allocating.
+#[derive(Debug, Clone)]
+pub struct CardSetIter(u64);
+
+impl Iterator for CardSetIter {
+    type Item = Card;
+
+    #[inline]
+    fn next(&mut self) -> Option<Card> {
+        if self.0 == 0 {
+            return None;
+        }
+        let card = Card(self.0.trailing_zeros());
+        self.0 &= self.0 - 1;
+        Some(card)
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.0.count_ones() as usize;
+        (len, Some(len))
+    }
+}
+
+impl DoubleEndedIterator for CardSetIter {
+    #[inline]
+    fn next_back(&mut self) -> Option<Card> {
+        if self.0 == 0 {
+            return None;
+        }
+        let card = Card(63 - self.0.leading_zeros());
+        self.0 &= !(1u64 << card.0);
+        Some(card)
+    }
+}
+
+impl ExactSizeIterator for CardSetIter {}
+impl FusedIterator for CardSetIter {}
+
+impl IntoIterator for CardSet {
+    type Item = Card;
+    type IntoIter = CardSetIter;
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suit_rank_paths_match_all_rank_patterns() {
+        for suit in Suit::ALL {
+            let suit_mask = 0x0001_1111_1111_1111u64 << suit as u32;
+            for ranks in 0u16..(1 << Rank::COUNT) {
+                // Fill other suits too, so they must be ignored by both paths.
+                let mut cards = CardSet::FULL - CardSet::from_bits(suit_mask);
+                for rank in Rank::ALL {
+                    if ranks & (1 << rank as u32) != 0 {
+                        cards.insert(Card::new(suit, rank));
+                    }
+                }
+                assert_eq!(cards.suit_ranks_portable(suit), ranks);
+                assert_eq!(cards.suit_ranks(suit), ranks);
+            }
+        }
+    }
+
+    #[test]
+    fn bits_match_card_encoding_and_suit_masks() {
+        assert_eq!(size_of::<CardSet>(), size_of::<u64>());
+        for card in Card::ALL {
+            let set = CardSet::from(card);
+            assert_eq!(set.bits(), 1u64 << card.0);
+            assert_eq!(set.iter().collect::<Vec<_>>(), [card]);
+            for suit in Suit::ALL {
+                assert_eq!(
+                    set.suit_ranks(suit),
+                    if suit == card.suit() {
+                        1 << card.rank() as u32
+                    } else {
+                        0
+                    }
+                );
+            }
+        }
+        assert_eq!(CardSet::from_bits(u64::MAX), CardSet::FULL);
+        assert_eq!(CardSet::FULL.len(), 52);
+        for suit in Suit::ALL {
+            assert_eq!(CardSet::FULL.suit_ranks(suit), 0x1fff);
+        }
+    }
+
+    #[test]
+    fn set_operations_and_iteration() {
+        let a = CardSet::parse("Ah Kd 2c Ah");
+        let b = CardSet::parse("Ah Qs");
+        assert_eq!(a.len(), 3);
+        assert_eq!(a & b, CardSet::parse("Ah"));
+        assert_eq!(a | b, CardSet::parse("Ah Kd 2c Qs"));
+        assert_eq!(a ^ b, CardSet::parse("Kd 2c Qs"));
+        assert_eq!(a - b, CardSet::parse("Kd 2c"));
+        assert!((a & b).is_subset(a));
+        assert!((!a).is_disjoint(a));
+        assert_eq!(a | !a, CardSet::FULL);
+        assert!((a & !a).is_empty());
+        let mut set = a;
+        set |= b;
+        set &= a;
+        set ^= b;
+        set -= b;
+        assert_eq!(set, a - b);
+        let ace = Card::parse_card("Ah");
+        assert!(set.insert(ace));
+        assert!(!set.insert(ace));
+        assert!(set.contains(ace));
+        assert!(set.remove(ace));
+        assert!(!set.remove(ace));
+        assert_eq!(
+            a.iter().rev().collect::<Vec<_>>(),
+            a.iter()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(a.iter().collect::<CardSet>(), a);
+    }
+
+    #[test]
+    fn sampling_excludes_known_cards() {
+        let known = CardSet::parse("Ah Kd 2c");
+        let mut rng = rand::rng();
+        for n in [0, 7, 49] {
+            let sampled = CardSet::sample_remain(known, &mut rng, n);
+            assert_eq!(sampled.len(), n);
+            assert!(sampled.is_disjoint(known));
+        }
     }
 }

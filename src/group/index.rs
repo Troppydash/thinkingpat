@@ -3,7 +3,7 @@ use std::cmp::Reverse;
 use fxhash::FxHashMap;
 
 use crate::{
-    game::card::{Card, Rank, Suit},
+    game::card::{Card, CardSet, Rank, Suit},
     group::group::Group,
 };
 
@@ -96,16 +96,10 @@ impl SuitIndex {
 }
 
 impl Group for SuitIndex {
-    fn map(&self, cards: &[Card]) -> usize {
+    fn map(&self, cards: CardSet) -> usize {
         debug_assert_eq!(cards.len(), self.cards, "incorrect number of cards");
         // group by suit sort by count
-        let mut suit = [0u16; Suit::COUNT];
-        for card in cards {
-            let mask = &mut suit[card.suit() as usize];
-            let bit = 1 << (card.rank() as usize);
-            debug_assert_eq!(*mask & bit, 0, "duplicate card");
-            *mask |= bit;
-        }
+        let mut suit = Suit::ALL.map(|suit| cards.suit_ranks(suit));
 
         suit.sort_unstable_by_key(|mask| (Reverse(mask.count_ones()), *mask));
         let pattern = suit.map(|mask| mask.count_ones() as u8);
@@ -177,13 +171,13 @@ mod tests {
             let mut seen = vec![None; index.size()];
             fn visit(
                 index: &SuitIndex,
-                hand: &mut Vec<Card>,
+                hand: CardSet,
                 next: usize,
                 seen: &mut [Option<[u16; Suit::COUNT]>],
             ) {
                 if hand.len() == index.cards {
                     let mut canonical = [0u16; Suit::COUNT];
-                    for card in hand.iter() {
+                    for card in hand {
                         canonical[card.suit() as usize] |= 1 << card.rank() as usize;
                     }
                     canonical.sort_unstable();
@@ -196,12 +190,10 @@ mod tests {
                     return;
                 }
                 for card in next..Card::COUNT {
-                    hand.push(Card::ALL[card]);
-                    visit(index, hand, card + 1, seen);
-                    hand.pop();
+                    visit(index, hand | CardSet::from(Card::ALL[card]), card + 1, seen);
                 }
             }
-            visit(&index, &mut Vec::new(), 0, &mut seen);
+            visit(&index, CardSet::EMPTY, 0, &mut seen);
             assert!(
                 seen.iter().all(Option::is_some),
                 "unused indices for {count} cards"
@@ -212,9 +204,9 @@ mod tests {
     #[test]
     fn suit_permutations_and_card_order_preserve_index() {
         for text in ["2h 3h 2d 3d As", "Ah Kh Qh Jh Th", "2h 3d 4s 5c 6h 7d 8s"] {
-            let hand = Card::parse_cards(text);
+            let hand = CardSet::parse(text);
             let index = SuitIndex::new(hand.len());
-            let expected = index.map(&hand);
+            let expected = index.map(hand);
             assert!(expected < index.size());
             for a in 0..4 {
                 for b in 0..4 {
@@ -224,7 +216,7 @@ mod tests {
                             if (0..4).any(|i| (0..i).any(|j| permutation[i] == permutation[j])) {
                                 continue;
                             }
-                            let mapped: Vec<_> = hand
+                            let mapped: CardSet = hand
                                 .iter()
                                 .rev()
                                 .map(|card| {
@@ -234,7 +226,7 @@ mod tests {
                                     )
                                 })
                                 .collect();
-                            assert_eq!(index.map(&mapped), expected);
+                            assert_eq!(index.map(mapped), expected);
                         }
                     }
                 }
@@ -244,21 +236,21 @@ mod tests {
 
     #[test]
     fn empty_and_full_decks_map_to_zero() {
-        assert_eq!(SuitIndex::new(0).map(&[]), 0);
-        assert_eq!(SuitIndex::new(Card::COUNT).map(&Card::ALL), 0);
+        assert_eq!(SuitIndex::new(0).map(CardSet::EMPTY), 0);
+        assert_eq!(SuitIndex::new(Card::COUNT).map(CardSet::FULL), 0);
     }
 
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "incorrect number of cards")]
     fn rejects_wrong_hand_size() {
-        SuitIndex::new(2).map(&Card::ALL[..1]);
+        SuitIndex::new(2).map(CardSet::from(Card::ALL[0]));
     }
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "duplicate card")]
-    fn rejects_duplicate_cards() {
-        SuitIndex::new(2).map(&[Card::ALL[0]; 2]);
+    #[should_panic(expected = "incorrect number of cards")]
+    fn duplicate_cards_do_not_increase_hand_size() {
+        SuitIndex::new(2).map(CardSet::from([Card::ALL[0]; 2]));
     }
 }
