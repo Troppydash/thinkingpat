@@ -38,6 +38,15 @@ impl Street {
             Street::River => None,
         }
     }
+
+    pub fn visible_community(&self) -> usize {
+        match self {
+            Street::Preflop => 0,
+            Street::Flop => 3,
+            Street::Turn => 4,
+            Street::River => 5,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -134,16 +143,9 @@ impl Board {
     }
 
     pub fn card_state(&self) -> CardState<&[Card]> {
-        let community_end = match self.street {
-            Street::Preflop => 0,
-            Street::Flop => 3,
-            Street::Turn => 4,
-            Street::River => 5,
-        };
-
         CardState {
             hands: self.presampled.hands,
-            community: &self.presampled.community[..community_end],
+            community: &self.presampled.community[..self.street.visible_community()],
         }
     }
 

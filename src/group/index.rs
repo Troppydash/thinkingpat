@@ -96,7 +96,12 @@ impl SuitIndex {
 }
 
 impl Group for SuitIndex {
-    fn map(&self, cards: CardSet) -> usize {
+    fn map(&self, hand: CardSet, community: CardSet) -> usize {
+        // TODO: uh hmm
+
+
+
+        
         debug_assert_eq!(cards.len(), self.cards, "incorrect number of cards");
         // group by suit sort by count
         let mut suit = Suit::ALL.map(|suit| cards.suit_ranks(suit));

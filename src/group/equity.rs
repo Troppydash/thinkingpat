@@ -1,8 +1,15 @@
 use rand::Rng;
 
 use crate::{
-    game::{board::Player, card::CardSet, showdown},
-    group::group::Group,
+    game::{
+        board::{Player, Street},
+        card::CardSet,
+        showdown,
+    },
+    group::{
+        group::Group,
+        vectordb::{EquityVector, U, Vectordb},
+    },
 };
 
 /// Maps dense bit positions onto the available card positions.
@@ -60,6 +67,8 @@ where
     }
 }
 
+const SIMULATE_ITERS: usize = 1000;
+
 fn simulate_equity<R: Rng>(
     rng: &mut R,
     hand: CardSet,
@@ -113,17 +122,120 @@ fn simulate_equity<R: Rng>(
     equity_bins
 }
 
+fn to_cdf(pdf: Vec<f32>) -> Vec<f32> {
+    let mut cumul = 0.0;
+    let mut out = vec![0.0; pdf.len()];
+    for (i, x) in pdf.iter().enumerate() {
+        cumul += x;
+        out[i] = cumul;
+    }
+
+    out
+}
+
+struct EquityPoint {
+    hand: CardSet,
+    community: CardSet,
+    equity: Vec<f32>,
+}
+
 /// hand equity distribution k means sample indexing
-struct Equity {}
-impl Equity {}
+pub struct Equity {
+    db: Box<dyn Vectordb>,
+    street: Street,
+    bins: usize,
+    groups: usize,
+}
+
+impl Equity {
+    pub fn compute<R: Rng>(
+        samples: usize,
+        num_centroids: usize,
+        bins: usize,
+        street: Street,
+        rng: &mut R,
+    ) -> Self {
+        let kmeans_iters = 100;
+
+        // sample points
+        let mut points: Vec<EquityPoint> = vec![];
+        points.reserve_exact(samples);
+        for _ in 0..samples {
+            let hand = CardSet::sample(rng, 2);
+            let community = CardSet::sample_remain(hand, rng, street.visible_community());
+            let equity = simulate_equity(rng, hand, community, bins, SIMULATE_ITERS);
+            let point = EquityPoint {
+                hand,
+                community,
+                equity,
+            };
+            points.push(point);
+        }
+
+        let mut centroids: Vec<EquityVector> =
+            rand::seq::index::sample(rng, samples, num_centroids)
+                .into_iter()
+                .map(|i| points[i].equity.clone())
+                .collect();
+
+        let mut db = U::new(bins);
+
+        // k means iteration
+        for _ in 0..kmeans_iters {
+            db.reset();
+            for (i, centroid) in centroids.iter().enumerate() {
+                db.store(i as u64, centroid);
+            }
+
+            // find closest centroid per point
+            let mut new_centroids: Vec<Vec<usize>> = vec![vec![]; num_centroids];
+            for (i, point) in points.iter().enumerate() {
+                let (centroid, _distance) = db.query(&point.equity);
+                new_centroids[centroid as usize].push(i);
+            }
+
+            // each centroid = average of points
+            for (centroid, close_points) in new_centroids.iter().enumerate() {
+                if close_points.is_empty() {
+                    // this can be bad
+                    continue;
+                }
+
+                let centroid = &mut centroids[centroid];
+                centroid.fill(0.0);
+                for p in close_points {
+                    for k in 0..bins {
+                        centroid[k] += points[*p].equity[k] / close_points.len() as f32;
+                    }
+                }
+            }
+        }
+
+        db.reset();
+        for (i, centroid) in centroids.iter().enumerate() {
+            db.store(i as u64, centroid);
+        }
+
+        Self {
+            db: Box::new(db),
+            street,
+            bins,
+            groups: num_centroids,
+        }
+    }
+}
 
 impl Group for Equity {
-    fn map(&self, cards: CardSet) -> usize {
-        todo!()
+    fn map(&self, hand: CardSet, community: CardSet) -> usize {
+        let mut rng = rand::rng();
+        let equity = simulate_equity(&mut rng, hand, community, self.bins, SIMULATE_ITERS);
+        let (i, _distance) = self.db.query(&equity);
+
+        i as usize
     }
 
     fn size(&self) -> usize {
-        todo!()
+        self.groups
     }
 }
 

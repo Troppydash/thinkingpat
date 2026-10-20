@@ -2,12 +2,13 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 pub type EquityVector = Vec<f32>;
 
-trait Graphdb {
-    fn store(&mut self, key: u64, x: EquityVector);
-    fn query(&self, x: EquityVector) -> (u64, f32);
+pub trait Vectordb {
+    fn store(&mut self, key: u64, x: &EquityVector);
+    fn query(&self, x: &EquityVector) -> (u64, f32);
+    fn reset(&mut self);
 }
 
-struct U {
+pub struct U {
     index: Index,
     dim: usize,
 }
@@ -36,12 +37,12 @@ impl U {
     }
 }
 
-impl Graphdb for U {
-    fn store(&mut self, key: u64, x: EquityVector) {
-        self.index.add(key as u64, &x).expect("Failed to store");
+impl Vectordb for U {
+    fn store(&mut self, key: u64, x: &EquityVector) {
+        self.index.add(key as u64, x).expect("Failed to store");
     }
 
-    fn query(&self, x: EquityVector) -> (u64, f32) {
+    fn query(&self, x: &EquityVector) -> (u64, f32) {
         let results = self.index.search(&x, 1).expect("Failed to query");
         let (key, distance) = results
             .keys
@@ -50,6 +51,10 @@ impl Graphdb for U {
             .next()
             .expect("Expected one result");
         (*key, *distance)
+    }
+
+    fn reset(&mut self) {
+        self.index.reset().expect("Failed to reset");
     }
 }
 
@@ -61,10 +66,10 @@ mod tests {
     fn query_uses_l1_instead_of_squared_l2() {
         let mut db = U::new(4);
         db.index.reserve(2).unwrap();
-        db.store(1, vec![3.0, 0.0, 0.0, 0.0]);
-        db.store(2, vec![1.0, 1.0, 1.0, 1.0]);
+        db.store(1, &vec![3.0, 0.0, 0.0, 0.0]);
+        db.store(2, &vec![1.0, 1.0, 1.0, 1.0]);
 
         // Squared L2 would prefer key 2 (4 < 9); L1 prefers key 1 (3 < 4).
-        assert_eq!(db.query(vec![0.0; 4]), (1, 3.0));
+        assert_eq!(db.query(&vec![0.0; 4]), (1, 3.0));
     }
 }

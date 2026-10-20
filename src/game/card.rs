@@ -211,7 +211,7 @@ impl CardSet {
         text.split_whitespace().map(Card::parse_card).collect()
     }
 
-    pub fn sample(rng: &mut ThreadRng, n: usize) -> CardSet {
+    pub fn sample<R: Rng>(rng: &mut R, n: usize) -> CardSet {
         Self::sample_remain(CardSet::EMPTY, rng, n)
     }
 
