@@ -1,3 +1,4 @@
+mod bits;
 mod game;
 mod group;
 

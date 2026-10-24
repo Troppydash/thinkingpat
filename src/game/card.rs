@@ -5,6 +5,8 @@ use std::{
 
 use rand::{Rng, RngExt, rngs::ThreadRng, seq::index};
 
+use crate::bits;
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Rank {
     Two,
@@ -184,22 +186,10 @@ impl CardSet {
     }
 
     /// Gather this suit's interleaved bits into a 13-bit rank mask.
-    #[cfg(target_feature = "bmi2")]
     #[inline]
-    pub unsafe fn suit_ranks(self, suit: Suit) -> u16 {
+    pub fn suit_ranks(self, suit: Suit) -> u16 {
         let mask = 0x0001_1111_1111_1111u64 << suit as u32;
-        std::arch::x86_64::_pext_u64(self.0, mask) as u16
-    }
-
-    #[cfg(not(target_feature = "bmi2"))]
-    #[inline]
-    pub const fn suit_ranks(self, suit: Suit) -> u16 {
-        let mut bits = (self.0 >> suit as u32) & 0x0001_1111_1111_1111;
-        // i don't understand this bitmask LLM magic but the bmi2 version is easier anyways
-        bits = (bits | (bits >> 3)) & 0x0303_0303_0303_0303;
-        bits = (bits | (bits >> 6)) & 0x000f_000f_000f_000f;
-        bits = (bits | (bits >> 12)) & 0x0000_00ff_0000_00ff;
-        (bits | (bits >> 24)) as u16
+        bits::pext(self.0, mask) as u16
     }
 
     #[inline]

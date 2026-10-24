@@ -1,6 +1,7 @@
-use rand::Rng;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::{
+    bits,
     game::{
         board::{Player, Street},
         card::CardSet,
@@ -11,31 +12,6 @@ use crate::{
         vectordb::{EquityVector, U, Vectordb},
     },
 };
-
-/// Maps dense bit positions onto the available card positions.
-#[inline]
-fn deposit_bits(source: u64, available: u64) -> u64 {
-    #[cfg(target_feature = "bmi2")]
-    {
-        unsafe { core::arch::x86_64::_pdep_u64(source, available) }
-    }
-
-    #[cfg(not(target_feature = "bmi2"))]
-    {
-        let mut source = source;
-        let mut available = available;
-        let mut out = 0;
-        while source != 0 {
-            let lowest = available.isolate_lowest_one();
-            if source & 1 != 0 {
-                out |= lowest;
-            }
-            source >>= 1;
-            available ^= lowest;
-        }
-        out
-    }
-}
 
 /// Visits each size-k subset of remain exactly once, in ascending bit order.
 fn iterate_community<F>(remain: CardSet, k: usize, mut f: F)
@@ -55,7 +31,7 @@ where
     let mut mask = u64::MAX >> (64 - k);
     let end_mask = mask << (n - k);
     loop {
-        f(CardSet(deposit_bits(mask, remain.0)));
+        f(CardSet(bits::pdep(mask, remain.0)));
         if mask == end_mask {
             break;
         }
@@ -67,15 +43,26 @@ where
     }
 }
 
+fn to_cdf(pdf: Vec<f32>) -> Vec<f32> {
+    let mut cumul = 0.0;
+    let mut out = vec![0.0; pdf.len()];
+    for (i, x) in pdf.iter().enumerate() {
+        cumul += x;
+        out[i] = cumul;
+    }
+
+    out
+}
+
 const SIMULATE_ITERS: usize = 1000;
 
-fn simulate_equity<R: Rng>(
-    rng: &mut R,
-    hand: CardSet,
-    community: CardSet,
-    bins: usize,
-    iters: usize,
-) -> Vec<f32> {
+fn simulate_equity(hand: CardSet, community: CardSet, bins: usize, iters: usize) -> Vec<f32> {
+    // we want a deterministic rng
+    let mut seed_bytes = [0u8; 32];
+    seed_bytes[..8].copy_from_slice(&hand.0.to_le_bytes());
+    seed_bytes[8..16].copy_from_slice(&community.0.to_le_bytes());
+    let mut rng = StdRng::from_seed(seed_bytes);
+
     // iterate all possible remaining community
     // rough counts: river -> 1, turn -> 44, flop -> 990
 
@@ -86,7 +73,7 @@ fn simulate_equity<R: Rng>(
     // hole iteration
     let mut i = 0;
     while i < iters {
-        let opp_hand = CardSet::sample_remain(hand | community, rng, 2);
+        let opp_hand = CardSet::sample_remain(hand | community, &mut rng, 2);
 
         // iterate over all community
         let remain = !(hand | opp_hand | community);
@@ -119,18 +106,7 @@ fn simulate_equity<R: Rng>(
         i += 1;
     }
 
-    equity_bins
-}
-
-fn to_cdf(pdf: Vec<f32>) -> Vec<f32> {
-    let mut cumul = 0.0;
-    let mut out = vec![0.0; pdf.len()];
-    for (i, x) in pdf.iter().enumerate() {
-        cumul += x;
-        out[i] = cumul;
-    }
-
-    out
+    to_cdf(equity_bins)
 }
 
 struct EquityPoint {
@@ -163,7 +139,7 @@ impl Equity {
         for _ in 0..samples {
             let hand = CardSet::sample(rng, 2);
             let community = CardSet::sample_remain(hand, rng, street.visible_community());
-            let equity = simulate_equity(rng, hand, community, bins, SIMULATE_ITERS);
+            let equity = simulate_equity(hand, community, bins, SIMULATE_ITERS);
             let point = EquityPoint {
                 hand,
                 community,
@@ -227,8 +203,7 @@ impl Equity {
 
 impl Group for Equity {
     fn map(&self, hand: CardSet, community: CardSet) -> usize {
-        let mut rng = rand::rng();
-        let equity = simulate_equity(&mut rng, hand, community, self.bins, SIMULATE_ITERS);
+        let equity = simulate_equity(hand, community, self.bins, SIMULATE_ITERS);
         let (i, _distance) = self.db.query(&equity);
 
         i as usize
@@ -299,7 +274,7 @@ mod tests {
         let community = CardSet::parse("4h 6s Js 7c Kh");
         let bins = 10;
         let iters = 200;
-        let output = simulate_equity(&mut rng, hand, community, bins, iters);
+        let output = simulate_equity(hand, community, bins, iters);
         // assert_eq!(output, vec![0.0; 10]);
         assert!(output[0] < output[9]);
     }
@@ -311,7 +286,7 @@ mod tests {
         let community = CardSet::parse("4h 6s Js 7c");
         let bins = 10;
         let iters = 200;
-        let output = simulate_equity(&mut rng, hand, community, bins, iters);
+        let output = simulate_equity(hand, community, bins, iters);
         // assert_eq!(output, vec![0.0; 10]);
         assert!(output[0] < output[9]);
     }

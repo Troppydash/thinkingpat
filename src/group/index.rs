@@ -3,6 +3,7 @@ use std::cmp::Reverse;
 use fxhash::FxHashMap;
 
 use crate::{
+    bits,
     game::card::{Card, CardSet, Rank, Suit},
     group::group::Group,
 };
@@ -43,26 +44,7 @@ struct PatternData {
 // For a specific suit, index (hand, community)
 fn index_suit(hand: u16, community: u16) -> usize {
     // note the subset for community always excludes hand, so we are free to exclude them
-    let mut compressed = 0;
-
-    #[cfg(target_feature = "bmi2")]
-    {
-        compressed = std::arch::x86_64::_pext_u64(community, !hand);
-    }
-
-    #[cfg(not(target_feature = "bmi2"))]
-    {
-        let mut i = 0;
-        for rank in 0..Rank::COUNT {
-            if hand & (1 << rank) == 0 {
-                if community & (1 << rank) != 0 {
-                    compressed |= 1 << i;
-                }
-                i += 1;
-            }
-        }
-    }
-
+    let compressed = bits::pext(community as u64, !hand as u64) as u16;
     cns(hand) + choose(Rank::COUNT as u64, hand.count_ones() as u64) as usize * cns(compressed)
 }
 

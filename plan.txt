@@ -1,4 +1,8 @@
 implement board (done)
-implement index
-implement equity group
+implement index (done)
+implement equity group (done)
+    elbow, metric (TODO)
+    generate
 implement mccfr
+    uci
+    exploitability
