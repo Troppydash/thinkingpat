@@ -25,6 +25,7 @@ const CHECKPOINT_BUFFER_SIZE: usize = 64 * 1024;
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
 struct InfosetData {
+    // TODO: consider fixed point
     regret_sum: Actions,
     strategy_sum: Actions,
 }
@@ -38,9 +39,8 @@ type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Default)]
 struct Infoset {
     // this is the mixed radix group index
-    group: usize,
+    group: u32,
     history: u32,
-    // A byte tag keeps every bit pattern valid when reading raw checkpoint bytes.
     street: u8,
     _padding: [u8; 3],
 }
@@ -52,7 +52,7 @@ struct CheckpointEntry {
     data: InfosetData,
 }
 
-const _: () = assert!(size_of::<Infoset>() == size_of::<usize>() + 8);
+const _: () = assert!(size_of::<Infoset>() == 2 * size_of::<u32>() + 4);
 const _: () = assert!(size_of::<InfosetData>() == 2 * size_of::<Actions>());
 const _: () =
     assert!(size_of::<CheckpointEntry>() == size_of::<Infoset>() + size_of::<InfosetData>());
@@ -71,7 +71,7 @@ impl Infoset {
 
         Self {
             street: street as u8,
-            group,
+            group: u32::try_from(group).expect("group index exceeds u32"),
             history: compressed_history,
             _padding: [0; 3],
         }
@@ -364,7 +364,7 @@ impl Solver {
             / 2.0
     }
 
-    pub fn solve(&mut self, iters: usize) {
+    pub fn solve(&mut self, filename: &str, iters: usize) {
         let mut history: SmallVec<[Action; MAX_ACTION_LENGTH]> = SmallVec::new();
         let states: usize = self.street_groups.iter().map(|s| s.size()).product();
         println!("info cfr states at least {states}");
@@ -384,11 +384,12 @@ impl Solver {
                 .unwrap();
             self.cfr(&reach_prob, &board, &mut history, &board_groups);
 
-            if self.iters % 10000 == 0 {
+            if self.iters % 50000 == 0 {
                 println!(
                     "info cfr exploitability {:.5} sb",
                     self.exploitability(5000)
                 );
+                self.save(&format!("{filename}/iter_{}.bin", self.iters));
             }
 
             self.iters += 1;

@@ -33,7 +33,7 @@ fn compute_equity_group(
     group.visualize(&mut rng, 100);
 }
 
-fn cfr_solve(street_groups: &[&str], iters: usize) {
+fn cfr_solve(filename: &str, street_groups: &[&str], iters: usize) {
     let mut solver = Solver::new(|street| {
         if street == Street::Preflop {
             return Box::new(SuitIndex::new(2, 0));
@@ -47,7 +47,7 @@ fn cfr_solve(street_groups: &[&str], iters: usize) {
         println!("info street {} filename {}", street.to_string(), filename);
         Box::new(Equity::load(filename))
     });
-    solver.solve(iters);
+    solver.solve(filename, iters);
 }
 
 fn ui(args: Vec<String>) {
@@ -77,11 +77,12 @@ fn ui(args: Vec<String>) {
             "cfr" => match parts[0] {
                 "solve" => {
                     let iters: usize = parts[1].parse().unwrap();
+                    let filename = parts[2];
                     let street_groups: Vec<&str> = Street::ALL
                         .into_iter()
-                        .map(|street| parts[2 + street as usize])
+                        .map(|street| parts[3 + street as usize])
                         .collect();
-                    cfr_solve(&street_groups, iters);
+                    cfr_solve(filename, &street_groups, iters);
                 }
                 _ => {
                     println!("warn unknown cfr command {}", parts[0]);
