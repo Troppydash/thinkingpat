@@ -1,13 +1,19 @@
+use core::panic;
+
 use rand::{SeedableRng, rngs::StdRng};
 use rustyline::DefaultEditor;
 
 use crate::{
+    arena::Arena,
+    bot::{cfr::Cfr, random::Random},
     game::board::Street,
     group::{equity::Equity, index::SuitIndex},
     solver::engine::Solver,
 };
 
+mod arena;
 mod bits;
+mod bot;
 mod game;
 mod group;
 mod solver;
@@ -50,6 +56,21 @@ fn cfr_solve(filename: &str, street_groups: &[&str], iters: usize) {
     solver.solve(filename, iters);
 }
 
+fn test0(filename: &str, street_groups: &[&str], iters: usize) {
+    let solver = Solver::load(filename, |street| {
+        if street == Street::Preflop {
+            return Box::new(SuitIndex::new(2, 0));
+        }
+
+        let filename = street_groups[street as usize];
+        println!("info street {} filename {}", street.to_string(), filename);
+        Box::new(Equity::load(filename))
+    });
+    let cfr = Cfr::new(solver);
+    let mut arena = Arena::new([Box::new(cfr), Box::new(Random)]);
+    arena.play(iters);
+}
+
 fn ui(args: Vec<String>) {
     let process_line = |line: &String| -> () {
         let parts: Vec<_> = line.split_whitespace().collect();
@@ -86,6 +107,20 @@ fn ui(args: Vec<String>) {
                 }
                 _ => {
                     println!("warn unknown cfr command {}", parts[0]);
+                }
+            },
+            "play" => match parts[0] {
+                "test0" => {
+                    let iters: usize = parts[1].parse().unwrap();
+                    let filename = parts[2];
+                    let street_groups: Vec<&str> = Street::ALL
+                        .into_iter()
+                        .map(|street| parts[3 + street as usize])
+                        .collect();
+                    test0(filename, &street_groups, iters);
+                }
+                _ => {
+                    panic!("");
                 }
             },
             _ => {

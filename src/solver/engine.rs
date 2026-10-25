@@ -37,7 +37,7 @@ type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 
 #[repr(C)]
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Default)]
-struct Infoset {
+pub struct Infoset {
     // this is the mixed radix group index
     group: u32,
     history: u32,
@@ -58,7 +58,7 @@ const _: () =
     assert!(size_of::<CheckpointEntry>() == size_of::<Infoset>() + size_of::<InfosetData>());
 
 impl Infoset {
-    fn new(street: Street, group: usize, history: &SmallVec<[Action; MAX_ACTION_LENGTH]>) -> Self {
+    fn new(street: Street, group: usize, history: &[Action]) -> Self {
         let mut compressed_history = 1u32 << history.len();
 
         for (i, action) in history.iter().enumerate() {
@@ -159,7 +159,7 @@ impl Solver {
     }
 
     #[inline]
-    fn average_strategy(&self, infoset: &Infoset, actions: usize) -> Actions {
+    pub fn average_strategy(&self, infoset: &Infoset, actions: usize) -> Actions {
         let strategies = self
             .infosets
             .get(infoset)
@@ -225,7 +225,9 @@ impl Solver {
         let data = self.infosets.get_mut(&infoset).unwrap();
         for i in 0..actions.len() {
             let opp_reach_prob = reach_prob[!board.stm() as usize];
-            data.regret_sum[i] += (opp_reach_prob * (counterfactual_value[i] - value)) as f32;
+            data.regret_sum[i] = (data.regret_sum[i]
+                + (opp_reach_prob * (counterfactual_value[i] - value)) as f32)
+                .max(0.0);
             data.strategy_sum[i] += (reach_prob[board.stm() as usize] * strategy[i] as f64) as f32;
         }
 
@@ -441,5 +443,25 @@ impl Solver {
         }
 
         solver
+    }
+
+    pub fn lookup(&mut self, board: &Board, history: &[Action]) -> Actions {
+        let card = board.card_state();
+        let hand = card.hands[board.stm() as usize];
+        let mut group = self.street_groups[Street::Preflop as usize].map(hand, CardSet::EMPTY);
+        for street in 1..=(board.street() as usize) {
+            group = group * self.street_groups[street].size()
+                + self.street_groups[street].map(
+                    hand,
+                    CardSet::from_iter(
+                        card.community[..Street::ALL[street].visible_community()]
+                            .iter()
+                            .cloned(),
+                    ),
+                );
+        }
+
+        let infoset = Infoset::new(board.street(), group, history);
+        self.average_strategy(&infoset, board.get_actions().len())
     }
 }
