@@ -6,14 +6,17 @@ use crate::{
         board::{Action, Board, CardState, Outcome, Player, Street},
         card::CardSet,
     },
-    group::{equity::Equity, group::Group},
+    group::group::Group,
 };
 
-pub const MAX_ACTION_LENGTH: usize = 4 * 4;
+pub const MAX_ACTION_LENGTH: usize = 8;
 pub const MAX_ACTIONS: usize = 3;
 type Actions = SmallVec<[f64; MAX_ACTIONS]>;
 type Policy = FxHashMap<Infoset, Actions>;
-type Belief = Vec<(Board, f64)>;
+// arbitrary 20
+type Belief = SmallVec<[(Board, f64); 20]>;
+
+type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct Infoset {
@@ -33,6 +36,39 @@ fn get_or_default<'a>(table: &'a mut Policy, key: &Infoset, actions: usize) -> &
 
 fn adjust_sign(x: f64, stm: Player, child_stm: Player) -> f64 {
     if stm != child_stm { -x } else { x }
+}
+
+fn make_board_groups(
+    boards: &[Board],
+    map: &[Box<dyn Group>; Street::COUNT],
+) -> FxHashMap<CardState, BoardGroups> {
+    let mut output: FxHashMap<CardState, BoardGroups> = FxHashMap::default();
+
+    for board in boards.iter() {
+        if output.contains_key(&board.card_state_full()) {
+            continue;
+        }
+
+        let mut groups = [[0; Street::COUNT]; Player::COUNT];
+        let cards = board.card_state_full();
+        for player in Player::ALL {
+            for street in Street::ALL {
+                let group = map[street as usize].map(
+                    cards.hands[player as usize],
+                    CardSet::from_iter(
+                        cards.community[..street.visible_community()]
+                            .iter()
+                            .cloned(),
+                    ),
+                );
+                groups[player as usize][street as usize] = group;
+            }
+        }
+
+        output.insert(board.card_state_full(), groups);
+    }
+
+    output
 }
 
 pub struct Solver {
@@ -78,18 +114,16 @@ impl Solver {
         reach_prob: &[f64; Player::COUNT],
         board: &Board,
         history: &mut SmallVec<[Action; MAX_ACTION_LENGTH]>,
+        board_group: &BoardGroups,
     ) -> f64 {
         // terminal
         if let Outcome::Winnings(winnings) = board.outcome() {
             return winnings[board.stm() as usize] as f64;
         }
 
-        let card_state = board.card_state();
-        let group = &self.street_groups[board.street() as usize];
-        let community_set = CardSet::from_iter(card_state.community.iter().cloned());
         let infoset = Infoset {
             street: board.street(),
-            group: group.map(card_state.hands[board.stm() as usize], community_set),
+            group: board_group[board.stm() as usize][board.street() as usize],
             history: history.clone(),
         };
 
@@ -107,7 +141,7 @@ impl Solver {
             reach_prob[board.stm() as usize] *= strategy[i];
 
             counterfactual_value[i] = adjust_sign(
-                self.cfr(&reach_prob, &new_board, history),
+                self.cfr(&reach_prob, &new_board, history, board_group),
                 board.stm(),
                 new_board.stm(),
             );
@@ -138,6 +172,7 @@ impl Solver {
         // weights are all !responder multiplied
         belief: Belief,
         history: &mut SmallVec<[Action; MAX_ACTION_LENGTH]>,
+        board_groups: &FxHashMap<CardState, BoardGroups>,
     ) -> f64 {
         // all the boards are synced
         let board = &belief[0].0;
@@ -168,15 +203,13 @@ impl Solver {
         // group boards by infosets
         let mut infosets: FxHashMap<Infoset, Belief> = FxHashMap::default();
         for (board, weight) in belief {
-            let cards = board.card_state();
             let infoset = Infoset {
                 street: board.street(),
-                group: self.street_groups[board.street() as usize].map(
-                    cards.hands[stm as usize],
-                    cards.community.iter().copied().collect(),
-                ),
+                group: board_groups[&board.card_state_full()][board.stm() as usize]
+                    [board.street() as usize],
                 history: history.clone(),
             };
+
             infosets.entry(infoset).or_default().push((board, weight));
         }
 
@@ -197,7 +230,8 @@ impl Solver {
                             })
                             .collect();
                         history.push(*action);
-                        let value = self.best_response_evaluate(responder, children, history);
+                        let value =
+                            self.best_response_evaluate(responder, children, history, board_groups);
                         history.pop();
 
                         total = total.max(value);
@@ -209,7 +243,7 @@ impl Solver {
         } else {
             // non responder doesn't partition by infoset because that is private information
             let mut children: SmallVec<[Belief; MAX_ACTIONS]> =
-                (0..actions.len()).map(|_| Vec::new()).collect();
+                (0..actions.len()).map(|_| SmallVec::new()).collect();
             for (infoset, states) in infosets {
                 let strategy = self.average_strategy(&infoset, actions.len());
                 for (board, weight) in states {
@@ -230,7 +264,7 @@ impl Solver {
                     continue;
                 }
                 history.push(*action);
-                total += self.best_response_evaluate(responder, states, history);
+                total += self.best_response_evaluate(responder, states, history, board_groups);
                 history.pop();
             }
             total
@@ -242,22 +276,24 @@ impl Solver {
         responder: Player,
         boards: &[Board],
         history: &mut SmallVec<[Action; MAX_ACTION_LENGTH]>,
+        board_groups: &FxHashMap<CardState, BoardGroups>,
     ) -> f64 {
         let chance_weight = 1.0 / boards.len() as f64;
         let belief = boards
             .iter()
-            .cloned()
-            .map(|board| (board, chance_weight))
+            .map(|board| (board.clone(), chance_weight))
             .collect();
-        self.best_response_evaluate(responder, belief, history)
+        self.best_response_evaluate(responder, belief, history, board_groups)
     }
 
     fn exploitability(&mut self, iters: usize) -> f64 {
         let boards: Vec<_> = (0..iters).map(|_| Board::new()).collect();
+        let board_groups = make_board_groups(&boards, &self.street_groups);
+
         let mut history: SmallVec<[Action; MAX_ACTION_LENGTH]> = SmallVec::new();
         Player::ALL
             .into_iter()
-            .map(|p| self.best_response(p, &boards, &mut history))
+            .map(|p| self.best_response(p, &boards, &mut history, &board_groups))
             .sum::<f64>()
             / 2.0
     }
@@ -267,13 +303,24 @@ impl Solver {
 
         let target = self.iters + iters;
         while self.iters < target {
-            println!("info cfr iter {}", self.iters);
+            if self.iters % 1000 == 0 {
+                println!("info cfr iter {}", self.iters);
+            }
             let board = Board::new();
             let reach_prob = [1.0; Player::COUNT];
-            self.cfr(&reach_prob, &board, &mut history);
 
-            if self.iters % 10 == 0 {
-                println!("info cfr exploitability {:.5}", self.exploitability(100));
+            let board_groups = make_board_groups(&[board.clone()], &self.street_groups)
+                .values()
+                .next()
+                .cloned()
+                .unwrap();
+            self.cfr(&reach_prob, &board, &mut history, &board_groups);
+
+            if self.iters % 10000 == 0 {
+                println!(
+                    "info cfr exploitability {:.5} sb",
+                    self.exploitability(5000)
+                );
             }
 
             self.iters += 1;

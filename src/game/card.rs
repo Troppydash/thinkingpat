@@ -90,16 +90,15 @@ impl ToString for Suit {
     }
 }
 
-// TODO: this can be u8
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 #[repr(transparent)]
-pub struct Card(pub u32);
+pub struct Card(pub u8);
 
 impl Card {
     pub const DEFAULT: Self = Self(0);
 
     pub const fn new(suit: Suit, rank: Rank) -> Self {
-        Self(suit as u32 + ((rank as u32) << 2))
+        Self(suit as u8 + ((rank as u8) << 2))
     }
 
     pub const fn suit(&self) -> Suit {
@@ -250,7 +249,7 @@ impl CardSet {
         let mut i = 0;
         let mut selected = CardSet::EMPTY;
         while i < n {
-            let card = Card(rng.random_range(0..Card::COUNT) as u32);
+            let card = Card(rng.random_range(0..Card::COUNT) as u8);
             if (selected | cards).contains(card) {
                 continue;
             }
@@ -266,7 +265,7 @@ impl CardSet {
         let mut i = 0;
         let mut found = cards;
         while i < N {
-            let card = Card(rng.random_range(0..Card::COUNT) as u32);
+            let card = Card(rng.random_range(0..Card::COUNT) as u8);
             if found.contains(card) {
                 continue;
             }
@@ -367,7 +366,7 @@ impl Iterator for CardSetIter {
         if self.0 == 0 {
             return None;
         }
-        let card = Card(self.0.trailing_zeros());
+        let card = Card(self.0.trailing_zeros() as u8);
         self.0 &= self.0 - 1;
         Some(card)
     }
@@ -385,7 +384,7 @@ impl DoubleEndedIterator for CardSetIter {
         if self.0 == 0 {
             return None;
         }
-        let card = Card(63 - self.0.leading_zeros());
+        let card = Card((63 - self.0.leading_zeros()) as u8);
         self.0 &= !(1u64 << card.0);
         Some(card)
     }

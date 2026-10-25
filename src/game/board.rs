@@ -1,4 +1,5 @@
 use std::{
+    hash::Hash,
     ops::{Neg, Not},
     str::FromStr,
 };
@@ -84,7 +85,7 @@ impl ToString for Street {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Player {
     BB,
     SB,
@@ -106,8 +107,8 @@ impl Not for Player {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct CardState<Community = [Card; 5]> {
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct CardState<Community: Hash = [Card; 5]> {
     pub hands: [CardSet; Player::COUNT],
     pub community: Community,
 }
@@ -134,7 +135,7 @@ pub enum Action {
     Raise(i32),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Outcome {
     Ongoing,
     Winnings([i32; Player::COUNT]),
@@ -184,6 +185,13 @@ impl Board {
         CardState {
             hands: self.presampled.hands,
             community: &self.presampled.community[..self.street.visible_community()],
+        }
+    }
+
+    pub fn card_state_full(&self) -> CardState {
+        CardState {
+            hands: self.presampled.hands,
+            community: self.presampled.community,
         }
     }
 

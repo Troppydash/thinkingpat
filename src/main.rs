@@ -1,7 +1,11 @@
 use rand::{SeedableRng, rngs::StdRng};
 use rustyline::DefaultEditor;
 
-use crate::{game::board::Street, group::equity::Equity, solver::engine::Solver};
+use crate::{
+    game::board::Street,
+    group::{equity::Equity, index::SuitIndex},
+    solver::engine::Solver,
+};
 
 mod bits;
 mod game;
@@ -31,6 +35,14 @@ fn compute_equity_group(
 
 fn cfr_solve(street_groups: &[&str], iters: usize) {
     let mut solver = Solver::new(|street| {
+        if street == Street::Preflop {
+            return Box::new(SuitIndex::new(2, 0));
+        }
+
+        if street == Street::Flop {
+            return Box::new(SuitIndex::new(2, 3));
+        }
+
         let filename = street_groups[street as usize];
         println!("info street {} filename {}", street.to_string(), filename);
         Box::new(Equity::load(filename))
