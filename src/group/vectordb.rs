@@ -40,7 +40,7 @@ impl U {
 
 impl Vectordb for U {
     fn reserve(&mut self, size: usize) {
-        self.index.reserve(size);
+        self.index.reserve(size).unwrap();
     }
 
     fn store(&mut self, key: u64, x: &EquityVector) {

@@ -1,4 +1,4 @@
 pub mod equity;
-mod group;
-mod index;
+pub mod group;
+pub mod index;
 mod vectordb;

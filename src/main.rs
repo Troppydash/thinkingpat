@@ -1,11 +1,12 @@
 use rand::{SeedableRng, rngs::StdRng};
 use rustyline::DefaultEditor;
 
-use crate::{game::board::Street, group::equity::Equity};
+use crate::{game::board::Street, group::equity::Equity, solver::engine::Solver};
 
 mod bits;
 mod game;
 mod group;
+mod solver;
 
 fn compute_equity_group(
     filename: &str,
@@ -26,6 +27,15 @@ fn compute_equity_group(
     let group = Equity::compute(samples, num_centroids, bins, street, &mut rng);
     group.save(filename);
     group.visualize(&mut rng, 100);
+}
+
+fn cfr_solve(street_groups: &[&str], iters: usize) {
+    let mut solver = Solver::new(|street| {
+        let filename = street_groups[street as usize];
+        println!("info street {} filename {}", street.to_string(), filename);
+        Box::new(Equity::load(filename))
+    });
+    solver.solve(iters);
 }
 
 fn ui(args: Vec<String>) {
@@ -50,6 +60,19 @@ fn ui(args: Vec<String>) {
                 }
                 _ => {
                     println!("warn unknown group command {}", parts[0]);
+                }
+            },
+            "cfr" => match parts[0] {
+                "solve" => {
+                    let iters: usize = parts[1].parse().unwrap();
+                    let street_groups: Vec<&str> = Street::ALL
+                        .into_iter()
+                        .map(|street| parts[2 + street as usize])
+                        .collect();
+                    cfr_solve(&street_groups, iters);
+                }
+                _ => {
+                    println!("warn unknown cfr command {}", parts[0]);
                 }
             },
             _ => {

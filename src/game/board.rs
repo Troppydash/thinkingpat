@@ -5,6 +5,7 @@ use std::{
 
 use rand::{rngs::ThreadRng, seq::index};
 use serde::{Deserialize, Serialize};
+use smallvec::{SmallVec, smallvec};
 
 use crate::game::{
     card::{Card, CardSet},
@@ -25,7 +26,7 @@ where
     output
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash)]
 pub enum Street {
     Preflop,
     Flop,
@@ -51,6 +52,9 @@ impl Street {
             Street::River => 5,
         }
     }
+
+    pub const COUNT: usize = 4;
+    pub const ALL: [Street; Self::COUNT] = [Self::Preflop, Self::Flop, Self::Turn, Self::River];
 }
 
 #[derive(Debug)]
@@ -88,6 +92,7 @@ pub enum Player {
 
 impl Player {
     pub const COUNT: usize = 2;
+    pub const ALL: [Player; Self::COUNT] = [Self::BB, Self::SB];
 }
 
 impl Not for Player {
@@ -101,9 +106,10 @@ impl Not for Player {
     }
 }
 
+#[derive(Clone)]
 pub struct CardState<Community = [Card; 5]> {
-    hands: [CardSet; Player::COUNT],
-    community: Community,
+    pub hands: [CardSet; Player::COUNT],
+    pub community: Community,
 }
 
 impl CardState {
@@ -120,7 +126,7 @@ impl CardState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Action {
     Fold,
     Call,
@@ -134,6 +140,7 @@ pub enum Outcome {
     Winnings([i32; Player::COUNT]),
 }
 
+#[derive(Clone)]
 pub struct Board {
     presampled: CardState,
     street: Street,
@@ -180,6 +187,14 @@ impl Board {
         }
     }
 
+    pub fn street(&self) -> Street {
+        self.street
+    }
+
+    pub fn stm(&self) -> Player {
+        self.stm
+    }
+
     fn bet(&mut self, player: Player, amount: i32) {
         self.cash_in_sb[player as usize] -= amount;
         self.pot_in_sb += amount;
@@ -192,10 +207,10 @@ impl Board {
         }
     }
 
-    pub fn get_actions(&self) -> Vec<Action> {
+    pub fn get_actions(&self) -> SmallVec<[Action; 3]> {
         debug_assert!(matches!(self.outcome, Outcome::Ongoing));
 
-        let mut actions = vec![Action::Fold, Action::Call];
+        let mut actions = smallvec![Action::Fold, Action::Call];
         if self.num_raises_this_street < MAX_RAISES_PER_STREET {
             let bet_in_sb = self.raise_amount() + self.raises_this_street_in_sb[!self.stm as usize]
                 - self.raises_this_street_in_sb[self.stm as usize];
@@ -475,7 +490,7 @@ mod tests {
             assert_eq!(board.raise_amount(), amount);
             assert_eq!(
                 board.get_actions(),
-                vec![Action::Fold, Action::Call, Action::Raise(amount)],
+                SmallVec::from_buf([Action::Fold, Action::Call, Action::Raise(amount)]),
             );
         }
     }
@@ -567,7 +582,10 @@ mod tests {
                 assert_eq!(board.street, street);
                 assert_chips_conserved(&board);
             }
-            assert_eq!(board.get_actions(), vec![Action::Fold, Action::Call]);
+            assert_eq!(
+                board.get_actions(),
+                SmallVec::from_buf([Action::Fold, Action::Call])
+            );
         }
     }
 

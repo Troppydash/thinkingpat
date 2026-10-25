@@ -1,0 +1,1 @@
+cargo run -r -- "cfr solve 100 ./data/equity/preflop.bin ./data/equity/flop.bin ./data/equity/turn.bin ./data/equity/river.bin"

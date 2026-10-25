@@ -264,6 +264,7 @@ impl Equity {
         let data = EquityData::load(filename);
 
         let mut db = Box::new(U::new(data.bins));
+        db.reserve(data.centroids.len());
         for (i, centroid) in data.centroids.iter().enumerate() {
             db.store(i as u64, centroid);
         }
