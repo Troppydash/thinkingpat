@@ -1,6 +1,10 @@
-use std::ops::{Neg, Not};
+use std::{
+    ops::{Neg, Not},
+    str::FromStr,
+};
 
 use rand::{rngs::ThreadRng, seq::index};
+use serde::{Deserialize, Serialize};
 
 use crate::game::{
     card::{Card, CardSet},
@@ -21,7 +25,7 @@ where
     output
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Street {
     Preflop,
     Flop,
@@ -45,6 +49,33 @@ impl Street {
             Street::Flop => 3,
             Street::Turn => 4,
             Street::River => 5,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ParseStreetError;
+impl FromStr for Street {
+    type Err = ParseStreetError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "preflop" => Ok(Self::Preflop),
+            "flop" => Ok(Self::Flop),
+            "turn" => Ok(Self::Turn),
+            "river" => Ok(Self::River),
+            _ => Err(ParseStreetError),
+        }
+    }
+}
+
+impl ToString for Street {
+    fn to_string(&self) -> String {
+        match self {
+            Street::Preflop => "preflop".into(),
+            Street::Flop => "flop".into(),
+            Street::Turn => "turn".into(),
+            Street::River => "river".into(),
         }
     }
 }

@@ -4,6 +4,7 @@ use std::{
 };
 
 use rand::{Rng, RngExt, rngs::ThreadRng, seq::index};
+use serde::{Deserialize, Serialize};
 
 use crate::bits;
 

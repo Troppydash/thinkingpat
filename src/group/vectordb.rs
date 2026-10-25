@@ -3,6 +3,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 pub type EquityVector = Vec<f32>;
 
 pub trait Vectordb {
+    fn reserve(&mut self, size: usize);
     fn store(&mut self, key: u64, x: &EquityVector);
     fn query(&self, x: &EquityVector) -> (u64, f32);
     fn reset(&mut self);
@@ -38,6 +39,10 @@ impl U {
 }
 
 impl Vectordb for U {
+    fn reserve(&mut self, size: usize) {
+        self.index.reserve(size);
+    }
+
     fn store(&mut self, key: u64, x: &EquityVector) {
         self.index.add(key as u64, x).expect("Failed to store");
     }

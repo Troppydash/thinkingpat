@@ -1,4 +1,5 @@
 use rand::{Rng, SeedableRng, rngs::StdRng};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     bits,
@@ -54,9 +55,16 @@ fn to_cdf(pdf: Vec<f32>) -> Vec<f32> {
     out
 }
 
-const SIMULATE_ITERS: usize = 1000;
+const SIMULATE_HOLE_ITERS: usize = 100;
+const SIMULATE_COMMUNITY_ITERS: usize = 100;
 
-fn simulate_equity(hand: CardSet, community: CardSet, bins: usize, iters: usize) -> Vec<f32> {
+fn simulate_equity(
+    hand: CardSet,
+    community: CardSet,
+    bins: usize,
+    hole_iters: usize,
+    community_iters: Option<usize>,
+) -> Vec<f32> {
     // we want a deterministic rng
     let mut seed_bytes = [0u8; 32];
     seed_bytes[..8].copy_from_slice(&hand.0.to_le_bytes());
@@ -71,8 +79,7 @@ fn simulate_equity(hand: CardSet, community: CardSet, bins: usize, iters: usize)
     let step = 1.0 / bins as f32;
 
     // hole iteration
-    let mut i = 0;
-    while i < iters {
+    for _ in 0..hole_iters {
         let opp_hand = CardSet::sample_remain(hand | community, &mut rng, 2);
 
         // iterate over all community
@@ -88,22 +95,35 @@ fn simulate_equity(hand: CardSet, community: CardSet, bins: usize, iters: usize)
         } else {
             let mut equity = 0.0;
             let mut count = 0;
-            iterate_community(remain, k, |extra_community| {
-                equity += match showdown::winner(hand, opp_hand, community | extra_community) {
-                    Some(Player::BB) => 1.0,
-                    Some(Player::SB) => 0.0,
-                    None => 0.5,
-                };
-                count += 1;
-            });
+
+            if let Some(community_iters) = community_iters {
+                // sample community instead
+                for _ in 0..community_iters {
+                    let extra_community =
+                        CardSet::sample_remain(hand | opp_hand | community, &mut rng, k);
+                    equity += match showdown::winner(hand, opp_hand, community | extra_community) {
+                        Some(Player::BB) => 1.0,
+                        Some(Player::SB) => 0.0,
+                        None => 0.5,
+                    };
+                    count += 1;
+                }
+            } else {
+                iterate_community(remain, k, |extra_community| {
+                    equity += match showdown::winner(hand, opp_hand, community | extra_community) {
+                        Some(Player::BB) => 1.0,
+                        Some(Player::SB) => 0.0,
+                        None => 0.5,
+                    };
+                    count += 1;
+                });
+            }
 
             equity / count as f32
         };
 
         let bin = ((equity / step).floor() as usize).min(bins - 1);
-        equity_bins[bin] += 1.0 / iters as f32;
-
-        i += 1;
+        equity_bins[bin] += 1.0 / hole_iters as f32;
     }
 
     to_cdf(equity_bins)
@@ -118,9 +138,10 @@ struct EquityPoint {
 /// hand equity distribution k means sample indexing
 pub struct Equity {
     db: Box<dyn Vectordb>,
+    // Technically this duplicates data, use an option if not needed
+    centroids: Vec<EquityVector>,
     street: Street,
     bins: usize,
-    groups: usize,
 }
 
 impl Equity {
@@ -136,10 +157,20 @@ impl Equity {
         // sample points
         let mut points: Vec<EquityPoint> = vec![];
         points.reserve_exact(samples);
-        for _ in 0..samples {
+        for i in 0..samples {
+            if i % 100 == 0 {
+                println!("debug samples {}", i);
+            }
+
             let hand = CardSet::sample(rng, 2);
             let community = CardSet::sample_remain(hand, rng, street.visible_community());
-            let equity = simulate_equity(hand, community, bins, SIMULATE_ITERS);
+            let equity = simulate_equity(
+                hand,
+                community,
+                bins,
+                SIMULATE_HOLE_ITERS,
+                Some(SIMULATE_COMMUNITY_ITERS),
+            );
             let point = EquityPoint {
                 hand,
                 community,
@@ -157,8 +188,13 @@ impl Equity {
         let mut db = U::new(bins);
 
         // k means iteration
-        for _ in 0..kmeans_iters {
+        for iter in 0..kmeans_iters {
+            if iter % 10 == 0 {
+                println!("debug kmeans iter {}", iter);
+            }
+
             db.reset();
+            db.reserve(num_centroids);
             for (i, centroid) in centroids.iter().enumerate() {
                 db.store(i as u64, centroid);
             }
@@ -188,29 +224,80 @@ impl Equity {
         }
 
         db.reset();
+        db.reserve(num_centroids);
         for (i, centroid) in centroids.iter().enumerate() {
             db.store(i as u64, centroid);
         }
 
         Self {
             db: Box::new(db),
+            centroids,
             street,
             bins,
-            groups: num_centroids,
+        }
+    }
+
+    pub fn save(&self, filename: &str) {
+        let data = EquityData {
+            centroids: self.centroids.clone(),
+            bins: self.bins,
+            street: self.street,
+        };
+        data.save(filename);
+    }
+
+    pub fn load(filename: &str) -> Self {
+        let data = EquityData::load(filename);
+
+        let mut db = Box::new(U::new(data.bins));
+        for (i, centroid) in data.centroids.iter().enumerate() {
+            db.store(i as u64, centroid);
+        }
+
+        Self {
+            db,
+            centroids: data.centroids,
+            bins: data.bins,
+            street: data.street,
         }
     }
 }
 
 impl Group for Equity {
     fn map(&self, hand: CardSet, community: CardSet) -> usize {
-        let equity = simulate_equity(hand, community, self.bins, SIMULATE_ITERS);
+        let equity = simulate_equity(
+            hand,
+            community,
+            self.bins,
+            SIMULATE_HOLE_ITERS,
+            Some(SIMULATE_COMMUNITY_ITERS),
+        );
         let (i, _distance) = self.db.query(&equity);
 
         i as usize
     }
 
     fn size(&self) -> usize {
-        self.groups
+        self.centroids.len()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct EquityData {
+    centroids: Vec<EquityVector>,
+    street: Street,
+    bins: usize,
+}
+
+impl EquityData {
+    fn save(&self, filename: &str) {
+        let bytes: Vec<u8> = postcard::to_allocvec(self).unwrap();
+        std::fs::write(filename, bytes).unwrap();
+    }
+
+    fn load(filename: &str) -> Self {
+        let bytes = std::fs::read(filename).unwrap();
+        postcard::from_bytes(&bytes).unwrap()
     }
 }
 
@@ -274,7 +361,7 @@ mod tests {
         let community = CardSet::parse("4h 6s Js 7c Kh");
         let bins = 10;
         let iters = 200;
-        let output = simulate_equity(hand, community, bins, iters);
+        let output = simulate_equity(hand, community, bins, iters, None);
         // assert_eq!(output, vec![0.0; 10]);
         assert!(output[0] < output[9]);
     }
@@ -286,7 +373,7 @@ mod tests {
         let community = CardSet::parse("4h 6s Js 7c");
         let bins = 10;
         let iters = 200;
-        let output = simulate_equity(hand, community, bins, iters);
+        let output = simulate_equity(hand, community, bins, iters, None);
         // assert_eq!(output, vec![0.0; 10]);
         assert!(output[0] < output[9]);
     }
