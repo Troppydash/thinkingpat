@@ -25,6 +25,7 @@ fn compute_equity_group(
 
     let group = Equity::compute(samples, num_centroids, bins, street, &mut rng);
     group.save(filename);
+    group.visualize(&mut rng, 100);
 }
 
 fn ui(args: Vec<String>) {

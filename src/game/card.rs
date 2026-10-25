@@ -44,6 +44,27 @@ impl Rank {
     ];
 }
 
+impl ToString for Rank {
+    fn to_string(&self) -> String {
+        match self {
+            Rank::Two => "2",
+            Rank::Three => "3",
+            Rank::Four => "4",
+            Rank::Five => "5",
+            Rank::Six => "6",
+            Rank::Seven => "7",
+            Rank::Eight => "8",
+            Rank::Nine => "9",
+            Rank::Ten => "T",
+            Rank::Jack => "J",
+            Rank::Queen => "Q",
+            Rank::King => "K",
+            Rank::Ace => "A",
+        }
+        .to_string()
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub enum Suit {
     Heart,
@@ -55,6 +76,18 @@ pub enum Suit {
 impl Suit {
     pub const COUNT: usize = 4;
     pub const ALL: [Suit; Self::COUNT] = [Suit::Heart, Suit::Diamond, Suit::Spade, Suit::Club];
+}
+
+impl ToString for Suit {
+    fn to_string(&self) -> String {
+        match self {
+            Suit::Heart => "h",
+            Suit::Diamond => "d",
+            Suit::Spade => "s",
+            Suit::Club => "c",
+        }
+        .to_string()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -124,6 +157,12 @@ impl Card {
     pub fn parse_cards(text: &str) -> Vec<Card> {
         let cards: Vec<_> = text.split_whitespace().map(Card::parse_card).collect();
         cards
+    }
+}
+
+impl ToString for Card {
+    fn to_string(&self) -> String {
+        self.rank().to_string() + &self.suit().to_string()
     }
 }
 
@@ -236,6 +275,13 @@ impl CardSet {
         }
 
         out
+    }
+
+    /// (hand, community)
+    pub fn sample2<R: Rng>(rng: &mut R, hand: usize, community: usize) -> (CardSet, CardSet) {
+        let hand = Self::sample(rng, hand);
+        let community = Self::sample_remain(hand, rng, community);
+        (hand, community)
     }
 }
 
@@ -353,6 +399,15 @@ impl IntoIterator for CardSet {
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl ToString for CardSet {
+    fn to_string(&self) -> String {
+        self.iter()
+            .map(|card| card.to_string())
+            .collect::<Vec<String>>()
+            .join(" ")
     }
 }
 
