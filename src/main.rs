@@ -39,9 +39,9 @@ fn cfr_solve(street_groups: &[&str], iters: usize) {
             return Box::new(SuitIndex::new(2, 0));
         }
 
-        if street == Street::Flop {
-            return Box::new(SuitIndex::new(2, 3));
-        }
+        // if street == Street::Flop {
+        //     return Box::new(SuitIndex::new(2, 3));
+        // }
 
         let filename = street_groups[street as usize];
         println!("info street {} filename {}", street.to_string(), filename);

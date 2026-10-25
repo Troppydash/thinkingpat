@@ -1,3 +1,5 @@
+use core::panic;
+
 use fxhash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
 
@@ -21,8 +23,29 @@ type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct Infoset {
     street: Street,
+    // this is the mixed radix group index
     group: usize,
-    history: SmallVec<[Action; MAX_ACTION_LENGTH]>,
+    history: u32,
+}
+
+impl Infoset {
+    fn new(street: Street, group: usize, history: &SmallVec<[Action; MAX_ACTION_LENGTH]>) -> Self {
+        let mut compressed_history = 1u32 << history.len();
+
+        for (i, action) in history.iter().enumerate() {
+            match *action {
+                Action::Fold => panic!("unexpected fold"),
+                Action::Call => compressed_history |= 1 << i,
+                Action::Raise(_) => {}
+            }
+        }
+
+        Self {
+            street,
+            group,
+            history: compressed_history,
+        }
+    }
 }
 
 fn get_or_default<'a>(table: &'a mut Policy, key: &Infoset, actions: usize) -> &'a mut Actions {
@@ -32,6 +55,14 @@ fn get_or_default<'a>(table: &'a mut Policy, key: &Infoset, actions: usize) -> &
     }
 
     table.get_mut(&key).unwrap()
+}
+
+fn read_or_default<'a>(table: &Policy, key: &Infoset, actions: usize) -> Actions {
+    if !table.contains_key(key) {
+        return smallvec![0.0; actions];
+    }
+
+    table.get(&key).unwrap().clone()
 }
 
 fn adjust_sign(x: f64, stm: Player, child_stm: Player) -> f64 {
@@ -61,7 +92,14 @@ fn make_board_groups(
                             .cloned(),
                     ),
                 );
-                groups[player as usize][street as usize] = group;
+
+                if street == Street::Preflop {
+                    groups[player as usize][street as usize] = group;
+                } else {
+                    groups[player as usize][street as usize] = group
+                        + groups[player as usize][street as usize - 1]
+                            * map[street as usize].size();
+                }
             }
         }
 
@@ -88,6 +126,7 @@ impl Solver {
         }
     }
 
+    #[inline]
     fn regret_matching(&mut self, infoset: &Infoset, actions: usize) -> Actions {
         let regrets = get_or_default(&mut self.regret_sum, infoset, actions);
         let total: f64 = regrets.iter().map(|x| x.max(0.0)).sum();
@@ -98,9 +137,9 @@ impl Solver {
         }
     }
 
+    #[inline]
     fn average_strategy(&mut self, infoset: &Infoset, actions: usize) -> Actions {
-        // TODO: change this to not [get_or_default]
-        let strategies = get_or_default(&mut self.strategy_sum, infoset, actions);
+        let strategies = read_or_default(&mut self.strategy_sum, infoset, actions);
         let total: f64 = strategies.iter().sum();
         if total < f64::EPSILON {
             smallvec![1.0 / actions as f64; actions]
@@ -121,11 +160,11 @@ impl Solver {
             return winnings[board.stm() as usize] as f64;
         }
 
-        let infoset = Infoset {
-            street: board.street(),
-            group: board_group[board.stm() as usize][board.street() as usize],
-            history: history.clone(),
-        };
+        let infoset = Infoset::new(
+            board.street(),
+            board_group[board.stm() as usize][board.street() as usize],
+            &history,
+        );
 
         let actions = board.get_actions();
         let strategy = self.regret_matching(&infoset, actions.len());
@@ -203,12 +242,12 @@ impl Solver {
         // group boards by infosets
         let mut infosets: FxHashMap<Infoset, Belief> = FxHashMap::default();
         for (board, weight) in belief {
-            let infoset = Infoset {
-                street: board.street(),
-                group: board_groups[&board.card_state_full()][board.stm() as usize]
+            let infoset = Infoset::new(
+                board.street(),
+                board_groups[&board.card_state_full()][board.stm() as usize]
                     [board.street() as usize],
-                history: history.clone(),
-            };
+                &history,
+            );
 
             infosets.entry(infoset).or_default().push((board, weight));
         }
@@ -300,6 +339,8 @@ impl Solver {
 
     pub fn solve(&mut self, iters: usize) {
         let mut history: SmallVec<[Action; MAX_ACTION_LENGTH]> = SmallVec::new();
+        let states: usize = self.street_groups.iter().map(|s| s.size()).product();
+        println!("info cfr states at least {states}");
 
         let target = self.iters + iters;
         while self.iters < target {

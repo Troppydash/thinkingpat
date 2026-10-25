@@ -11,6 +11,7 @@ use crate::{
     },
     group::{
         group::Group,
+        index::choose,
         vectordb::{EquityVector, U, Vectordb},
     },
 };
@@ -108,7 +109,10 @@ fn simulate_equity(
             let mut equity = 0.0;
             let mut count = 0;
 
-            if let Some(community_iters) = community_iters {
+            let full = choose(remain.len() as u64, k as u64) as usize;
+            if let Some(community_iters) = community_iters
+                && community_iters < full
+            {
                 // sample community instead
                 for _ in 0..community_iters {
                     let extra_community =

@@ -14,8 +14,8 @@ use crate::game::{
 };
 
 pub const PRESAMPLED_SIZE: usize = 2 + 2 + 5;
-pub const CASH_IN_SB: i32 = 1000;
-pub const BB_IN_SB: i32 = 2;
+pub const CASH_IN_SB: i16 = 1000;
+pub const BB_IN_SB: i16 = 2;
 pub const MAX_RAISES_PER_STREET: i32 = 3;
 
 fn make_oppsite<T>(score: T, side: Player) -> [T; Player::COUNT]
@@ -131,14 +131,14 @@ impl CardState {
 pub enum Action {
     Fold,
     Call,
-    // the i32 is EXTRA in additional to existing raises
-    Raise(i32),
+    // the i16 is EXTRA in additional to existing raises
+    Raise(i16),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Outcome {
     Ongoing,
-    Winnings([i32; Player::COUNT]),
+    Winnings([i16; Player::COUNT]),
 }
 
 #[derive(Clone, Debug)]
@@ -146,10 +146,10 @@ pub struct Board {
     presampled: CardState,
     street: Street,
     stm: Player,
-    cash_in_sb: [i32; Player::COUNT],
-    pot_in_sb: i32,
+    cash_in_sb: [i16; Player::COUNT],
+    pot_in_sb: i16,
     num_raises_this_street: i32,
-    raises_this_street_in_sb: [i32; Player::COUNT],
+    raises_this_street_in_sb: [i16; Player::COUNT],
     has_called_this_street: [bool; Player::COUNT],
     outcome: Outcome,
 }
@@ -203,12 +203,12 @@ impl Board {
         self.stm
     }
 
-    fn bet(&mut self, player: Player, amount: i32) {
+    fn bet(&mut self, player: Player, amount: i16) {
         self.cash_in_sb[player as usize] -= amount;
         self.pot_in_sb += amount;
     }
 
-    fn raise_amount(&self) -> i32 {
+    fn raise_amount(&self) -> i16 {
         match self.street {
             Street::Preflop | Street::Flop => BB_IN_SB,
             Street::Turn | Street::River => BB_IN_SB * 2,
@@ -353,8 +353,8 @@ mod tests {
 
     fn assert_chips_conserved(board: &Board) {
         assert_eq!(
-            board.cash_in_sb.iter().sum::<i32>() + board.pot_in_sb,
-            CASH_IN_SB * Player::COUNT as i32,
+            board.cash_in_sb.iter().sum::<i16>() + board.pot_in_sb,
+            CASH_IN_SB * Player::COUNT as i16,
         );
         assert!(board.cash_in_sb.iter().all(|&cash| cash >= 0));
     }

@@ -8,7 +8,7 @@ use crate::{
     group::group::Group,
 };
 
-fn choose(n: u64, k: u64) -> u64 {
+pub fn choose(n: u64, k: u64) -> u64 {
     if k > n {
         return 0;
     }
