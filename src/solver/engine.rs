@@ -1,7 +1,11 @@
 use core::panic;
+use std::{
+    fs::File,
+    io::{self, BufReader, BufWriter, Read, Write},
+};
 
 use fxhash::FxHashMap;
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 
 use crate::{
     game::{
@@ -11,22 +15,47 @@ use crate::{
     group::group::Group,
 };
 
-pub const MAX_ACTION_LENGTH: usize = 8;
+pub const MAX_ACTION_LENGTH: usize = 12;
 pub const MAX_ACTIONS: usize = 3;
-type Actions = SmallVec<[f64; MAX_ACTIONS]>;
-type Policy = FxHashMap<Infoset, Actions>;
+type Actions = [f32; MAX_ACTIONS];
+type Policy = FxHashMap<Infoset, InfosetData>;
+
+const CHECKPOINT_BUFFER_SIZE: usize = 64 * 1024;
+
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct InfosetData {
+    regret_sum: Actions,
+    strategy_sum: Actions,
+}
+
 // arbitrary 20
 type Belief = SmallVec<[(Board, f64); 20]>;
 
 type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 
-#[derive(Hash, PartialEq, Eq, Clone)]
+#[repr(C)]
+#[derive(Hash, PartialEq, Eq, Clone, Copy, Default)]
 struct Infoset {
-    street: Street,
     // this is the mixed radix group index
     group: usize,
     history: u32,
+    // A byte tag keeps every bit pattern valid when reading raw checkpoint bytes.
+    street: u8,
+    _padding: [u8; 3],
 }
+
+#[repr(C)]
+#[derive(Default)]
+struct CheckpointEntry {
+    infoset: Infoset,
+    data: InfosetData,
+}
+
+const _: () = assert!(size_of::<Infoset>() == size_of::<usize>() + 8);
+const _: () = assert!(size_of::<InfosetData>() == 2 * size_of::<Actions>());
+const _: () =
+    assert!(size_of::<CheckpointEntry>() == size_of::<Infoset>() + size_of::<InfosetData>());
 
 impl Infoset {
     fn new(street: Street, group: usize, history: &SmallVec<[Action; MAX_ACTION_LENGTH]>) -> Self {
@@ -41,32 +70,22 @@ impl Infoset {
         }
 
         Self {
-            street,
+            street: street as u8,
             group,
             history: compressed_history,
+            _padding: [0; 3],
         }
     }
 }
 
-fn get_or_default<'a>(table: &'a mut Policy, key: &Infoset, actions: usize) -> &'a mut Actions {
-    if !table.contains_key(key) {
-        let value = smallvec![0.0; actions];
-        table.insert(key.clone(), value);
-    }
-
-    table.get_mut(&key).unwrap()
-}
-
-fn read_or_default<'a>(table: &Policy, key: &Infoset, actions: usize) -> Actions {
-    if !table.contains_key(key) {
-        return smallvec![0.0; actions];
-    }
-
-    table.get(&key).unwrap().clone()
-}
-
 fn adjust_sign(x: f64, stm: Player, child_stm: Player) -> f64 {
     if stm != child_stm { -x } else { x }
+}
+
+fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
+    let mut bytes = [0; 8];
+    reader.read_exact(&mut bytes)?;
+    Ok(u64::from_le_bytes(bytes))
 }
 
 fn make_board_groups(
@@ -110,8 +129,7 @@ fn make_board_groups(
 }
 
 pub struct Solver {
-    regret_sum: Policy,
-    strategy_sum: Policy,
+    infosets: Policy,
     street_groups: [Box<dyn Group>; Street::COUNT],
     iters: usize,
 }
@@ -119,8 +137,7 @@ pub struct Solver {
 impl Solver {
     pub fn new(load: impl Fn(Street) -> Box<dyn Group>) -> Self {
         Self {
-            regret_sum: FxHashMap::default(),
-            strategy_sum: FxHashMap::default(),
+            infosets: FxHashMap::default(),
             street_groups: Street::ALL.map(load),
             iters: 0,
         }
@@ -128,24 +145,35 @@ impl Solver {
 
     #[inline]
     fn regret_matching(&mut self, infoset: &Infoset, actions: usize) -> Actions {
-        let regrets = get_or_default(&mut self.regret_sum, infoset, actions);
-        let total: f64 = regrets.iter().map(|x| x.max(0.0)).sum();
+        let regrets = &self.infosets.entry(infoset.clone()).or_default().regret_sum;
+        let total: f64 = regrets[..actions].iter().map(|x| x.max(0.0) as f64).sum();
+        let mut strategy = [0.0; MAX_ACTIONS];
         if total < f64::EPSILON {
-            smallvec![1.0 / actions as f64; actions]
+            strategy[..actions].fill(1.0 / actions as f32);
         } else {
-            regrets.iter().map(|x| x.max(0.0) / total).collect()
+            for i in 0..actions {
+                strategy[i] = (regrets[i].max(0.0) as f64 / total) as f32;
+            }
         }
+        strategy
     }
 
     #[inline]
-    fn average_strategy(&mut self, infoset: &Infoset, actions: usize) -> Actions {
-        let strategies = read_or_default(&mut self.strategy_sum, infoset, actions);
-        let total: f64 = strategies.iter().sum();
+    fn average_strategy(&self, infoset: &Infoset, actions: usize) -> Actions {
+        let strategies = self
+            .infosets
+            .get(infoset)
+            .map_or([0.0; MAX_ACTIONS], |data| data.strategy_sum);
+        let total: f64 = strategies[..actions].iter().map(|x| *x as f64).sum();
+        let mut strategy = [0.0; MAX_ACTIONS];
         if total < f64::EPSILON {
-            smallvec![1.0 / actions as f64; actions]
+            strategy[..actions].fill(1.0 / actions as f32);
         } else {
-            strategies.iter().map(|x| x / total).collect()
+            for i in 0..actions {
+                strategy[i] = (strategies[i] as f64 / total) as f32;
+            }
         }
+        strategy
     }
 
     fn cfr(
@@ -169,7 +197,7 @@ impl Solver {
         let actions = board.get_actions();
         let strategy = self.regret_matching(&infoset, actions.len());
 
-        let mut counterfactual_value: Actions = smallvec![0.0; actions.len()];
+        let mut counterfactual_value = [0.0_f64; MAX_ACTIONS];
         for (i, action) in actions.iter().enumerate() {
             let mut new_board = board.clone();
             new_board.play(*action);
@@ -177,7 +205,7 @@ impl Solver {
             history.push(*action);
 
             let mut reach_prob = reach_prob.clone();
-            reach_prob[board.stm() as usize] *= strategy[i];
+            reach_prob[board.stm() as usize] *= strategy[i] as f64;
 
             counterfactual_value[i] = adjust_sign(
                 self.cfr(&reach_prob, &new_board, history, board_group),
@@ -190,16 +218,15 @@ impl Solver {
         let value: f64 = counterfactual_value
             .iter()
             .enumerate()
-            .map(|(i, v)| strategy[i] * v)
+            .map(|(i, v)| strategy[i] as f64 * v)
             .sum();
 
         // regret sum update
-        let regrets = get_or_default(&mut self.regret_sum, &infoset, actions.len());
-        let strategies = get_or_default(&mut self.strategy_sum, &infoset, actions.len());
+        let data = self.infosets.get_mut(&infoset).unwrap();
         for i in 0..actions.len() {
             let opp_reach_prob = reach_prob[!board.stm() as usize];
-            regrets[i] += opp_reach_prob * (counterfactual_value[i] - value);
-            strategies[i] += reach_prob[board.stm() as usize] * strategy[i];
+            data.regret_sum[i] += (opp_reach_prob * (counterfactual_value[i] - value)) as f32;
+            data.strategy_sum[i] += (reach_prob[board.stm() as usize] * strategy[i] as f64) as f32;
         }
 
         return value;
@@ -287,7 +314,7 @@ impl Solver {
                 let strategy = self.average_strategy(&infoset, actions.len());
                 for (board, weight) in states {
                     for (i, action) in actions.iter().enumerate() {
-                        let child_weight = weight * strategy[i];
+                        let child_weight = weight * strategy[i] as f64;
                         if child_weight > 0.0 {
                             let mut child = board.clone();
                             child.play(*action);
@@ -366,5 +393,52 @@ impl Solver {
 
             self.iters += 1;
         }
+    }
+
+    pub fn save(&self, filename: &str) {
+        let mut writer =
+            BufWriter::with_capacity(CHECKPOINT_BUFFER_SIZE, File::create(filename).unwrap());
+        writer
+            .write_all(&(self.infosets.len() as u64).to_le_bytes())
+            .unwrap();
+
+        for (infoset, data) in &self.infosets {
+            let record = CheckpointEntry {
+                infoset: *infoset,
+                data: *data,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&record as *const CheckpointEntry).cast::<u8>(),
+                    size_of::<CheckpointEntry>(),
+                )
+            };
+            writer.write_all(bytes).unwrap();
+        }
+
+        writer.flush().unwrap()
+    }
+
+    pub fn load(filename: &str, load: impl Fn(Street) -> Box<dyn Group>) -> Self {
+        let mut reader =
+            BufReader::with_capacity(CHECKPOINT_BUFFER_SIZE, File::open(filename).unwrap());
+        let mut solver = Self::new(load);
+        let count = read_u64(&mut reader).unwrap() as usize;
+        solver.infosets.try_reserve(count).unwrap();
+
+        for _ in 0..count {
+            let mut record = CheckpointEntry::default();
+
+            let bytes = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (&mut record as *mut CheckpointEntry).cast::<u8>(),
+                    size_of::<CheckpointEntry>(),
+                )
+            };
+            reader.read_exact(bytes).unwrap();
+            solver.infosets.insert(record.infoset, record.data);
+        }
+
+        solver
     }
 }

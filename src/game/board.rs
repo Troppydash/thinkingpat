@@ -35,6 +35,12 @@ pub enum Street {
     River,
 }
 
+impl Default for Street {
+    fn default() -> Self {
+        Self::Preflop
+    }
+}
+
 impl Street {
     fn next_street(&self) -> Option<Street> {
         match self {
