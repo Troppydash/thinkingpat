@@ -90,6 +90,7 @@ impl ToString for Suit {
     }
 }
 
+// TODO: this can be u8
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[repr(transparent)]
 pub struct Card(pub u32);

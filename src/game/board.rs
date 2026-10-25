@@ -106,7 +106,7 @@ impl Not for Player {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CardState<Community = [Card; 5]> {
     pub hands: [CardSet; Player::COUNT],
     pub community: Community,
@@ -140,7 +140,7 @@ pub enum Outcome {
     Winnings([i32; Player::COUNT]),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Board {
     presampled: CardState,
     street: Street,

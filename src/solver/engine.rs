@@ -11,6 +11,9 @@ use crate::{
 
 pub const MAX_ACTION_LENGTH: usize = 4 * 4;
 pub const MAX_ACTIONS: usize = 3;
+type Actions = SmallVec<[f64; MAX_ACTIONS]>;
+type Policy = FxHashMap<Infoset, Actions>;
+type Belief = Vec<(Board, f64)>;
 
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct Infoset {
@@ -19,11 +22,7 @@ struct Infoset {
     history: SmallVec<[Action; MAX_ACTION_LENGTH]>,
 }
 
-fn get_or_default<'a>(
-    table: &'a mut FxHashMap<Infoset, SmallVec<[f32; MAX_ACTIONS]>>,
-    key: &Infoset,
-    actions: usize,
-) -> &'a mut SmallVec<[f32; MAX_ACTIONS]> {
+fn get_or_default<'a>(table: &'a mut Policy, key: &Infoset, actions: usize) -> &'a mut Actions {
     if !table.contains_key(key) {
         let value = smallvec![0.0; actions];
         table.insert(key.clone(), value);
@@ -32,10 +31,15 @@ fn get_or_default<'a>(
     table.get_mut(&key).unwrap()
 }
 
+fn adjust_sign(x: f64, stm: Player, child_stm: Player) -> f64 {
+    if stm != child_stm { -x } else { x }
+}
+
 pub struct Solver {
-    regret_sum: FxHashMap<Infoset, SmallVec<[f32; MAX_ACTIONS]>>,
-    strategy_sum: FxHashMap<Infoset, SmallVec<[f32; MAX_ACTIONS]>>,
+    regret_sum: Policy,
+    strategy_sum: Policy,
     street_groups: [Box<dyn Group>; Street::COUNT],
+    iters: usize,
 }
 
 impl Solver {
@@ -44,32 +48,40 @@ impl Solver {
             regret_sum: FxHashMap::default(),
             strategy_sum: FxHashMap::default(),
             street_groups: Street::ALL.map(load),
+            iters: 0,
         }
     }
 
-    fn regret_matching(
-        &mut self,
-        infoset: &Infoset,
-        actions: usize,
-    ) -> SmallVec<[f32; MAX_ACTIONS]> {
+    fn regret_matching(&mut self, infoset: &Infoset, actions: usize) -> Actions {
         let regrets = get_or_default(&mut self.regret_sum, infoset, actions);
-        let total: f32 = regrets.iter().map(|x| x.max(0.0)).sum();
-
-        regrets.iter().map(|x| x / total).collect()
+        let total: f64 = regrets.iter().map(|x| x.max(0.0)).sum();
+        if total < f64::EPSILON {
+            smallvec![1.0 / actions as f64; actions]
+        } else {
+            regrets.iter().map(|x| x.max(0.0) / total).collect()
+        }
     }
 
-    /// return utility
+    fn average_strategy(&mut self, infoset: &Infoset, actions: usize) -> Actions {
+        // TODO: change this to not [get_or_default]
+        let strategies = get_or_default(&mut self.strategy_sum, infoset, actions);
+        let total: f64 = strategies.iter().sum();
+        if total < f64::EPSILON {
+            smallvec![1.0 / actions as f64; actions]
+        } else {
+            strategies.iter().map(|x| x / total).collect()
+        }
+    }
+
     fn cfr(
         &mut self,
-        // optimizing player
-        player: Player,
-        reach_prob: &[f32; Player::COUNT],
+        reach_prob: &[f64; Player::COUNT],
         board: &Board,
         history: &mut SmallVec<[Action; MAX_ACTION_LENGTH]>,
-    ) -> f32 {
+    ) -> f64 {
         // terminal
         if let Outcome::Winnings(winnings) = board.outcome() {
-            return winnings[player as usize] as f32;
+            return winnings[board.stm() as usize] as f64;
         }
 
         let card_state = board.card_state();
@@ -84,7 +96,7 @@ impl Solver {
         let actions = board.get_actions();
         let strategy = self.regret_matching(&infoset, actions.len());
 
-        let mut counterfactual_value: SmallVec<[f32; MAX_ACTIONS]> = smallvec![0.0; actions.len()];
+        let mut counterfactual_value: Actions = smallvec![0.0; actions.len()];
         for (i, action) in actions.iter().enumerate() {
             let mut new_board = board.clone();
             new_board.play(*action);
@@ -94,11 +106,15 @@ impl Solver {
             let mut reach_prob = reach_prob.clone();
             reach_prob[board.stm() as usize] *= strategy[i];
 
-            counterfactual_value[i] = self.cfr(player, &reach_prob, &new_board, history);
+            counterfactual_value[i] = adjust_sign(
+                self.cfr(&reach_prob, &new_board, history),
+                board.stm(),
+                new_board.stm(),
+            );
             history.pop();
         }
 
-        let value: f32 = counterfactual_value
+        let value: f64 = counterfactual_value
             .iter()
             .enumerate()
             .map(|(i, v)| strategy[i] * v)
@@ -108,23 +124,159 @@ impl Solver {
         let regrets = get_or_default(&mut self.regret_sum, &infoset, actions.len());
         let strategies = get_or_default(&mut self.strategy_sum, &infoset, actions.len());
         for i in 0..actions.len() {
-            let opp_reach_prob = reach_prob[!player as usize];
-            regrets[i] += opp_reach_prob * (value - counterfactual_value[i]);
-            strategies[i] += reach_prob[player as usize] * strategy[i];
+            let opp_reach_prob = reach_prob[!board.stm() as usize];
+            regrets[i] += opp_reach_prob * (counterfactual_value[i] - value);
+            strategies[i] += reach_prob[board.stm() as usize] * strategy[i];
         }
 
         return value;
     }
 
+    fn best_response_evaluate(
+        &mut self,
+        responder: Player,
+        // weights are all !responder multiplied
+        belief: Belief,
+        history: &mut SmallVec<[Action; MAX_ACTION_LENGTH]>,
+    ) -> f64 {
+        // all the boards are synced
+        let board = &belief[0].0;
+        if let Outcome::Winnings(_) = board.outcome() {
+            return belief
+                .iter()
+                .map(|(board, weight)| {
+                    let Outcome::Winnings(winnings) = board.outcome() else {
+                        panic!("best-response deals must share a public betting history");
+                    };
+                    weight * winnings[responder as usize] as f64
+                })
+                .sum();
+        }
+
+        let actions = board.get_actions();
+        let stm = board.stm();
+        assert!(
+            belief.iter().all(|(other, _)| {
+                other.outcome() == Outcome::Ongoing
+                    && other.street() == board.street()
+                    && other.stm() == stm
+                    && other.get_actions() == actions
+            }),
+            "best-response deals must share a public betting history"
+        );
+
+        // group boards by infosets
+        let mut infosets: FxHashMap<Infoset, Belief> = FxHashMap::default();
+        for (board, weight) in belief {
+            let cards = board.card_state();
+            let infoset = Infoset {
+                street: board.street(),
+                group: self.street_groups[board.street() as usize].map(
+                    cards.hands[stm as usize],
+                    cards.community.iter().copied().collect(),
+                ),
+                history: history.clone(),
+            };
+            infosets.entry(infoset).or_default().push((board, weight));
+        }
+
+        if stm == responder {
+            infosets
+                .into_values()
+                .map(|states| {
+                    assert!(!states.is_empty());
+
+                    let mut total = f64::NEG_INFINITY;
+                    for action in actions.iter() {
+                        let children = states
+                            .iter()
+                            .map(|(board, weight)| {
+                                let mut child = board.clone();
+                                child.play(*action);
+                                (child, *weight)
+                            })
+                            .collect();
+                        history.push(*action);
+                        let value = self.best_response_evaluate(responder, children, history);
+                        history.pop();
+
+                        total = total.max(value);
+                    }
+
+                    total
+                })
+                .sum()
+        } else {
+            // non responder doesn't partition by infoset because that is private information
+            let mut children: SmallVec<[Belief; MAX_ACTIONS]> =
+                (0..actions.len()).map(|_| Vec::new()).collect();
+            for (infoset, states) in infosets {
+                let strategy = self.average_strategy(&infoset, actions.len());
+                for (board, weight) in states {
+                    for (i, action) in actions.iter().enumerate() {
+                        let child_weight = weight * strategy[i];
+                        if child_weight > 0.0 {
+                            let mut child = board.clone();
+                            child.play(*action);
+                            children[i].push((child, child_weight));
+                        }
+                    }
+                }
+            }
+
+            let mut total = 0.0;
+            for (action, states) in actions.iter().zip(children) {
+                if states.is_empty() {
+                    continue;
+                }
+                history.push(*action);
+                total += self.best_response_evaluate(responder, states, history);
+                history.pop();
+            }
+            total
+        }
+    }
+
+    fn best_response(
+        &mut self,
+        responder: Player,
+        boards: &[Board],
+        history: &mut SmallVec<[Action; MAX_ACTION_LENGTH]>,
+    ) -> f64 {
+        let chance_weight = 1.0 / boards.len() as f64;
+        let belief = boards
+            .iter()
+            .cloned()
+            .map(|board| (board, chance_weight))
+            .collect();
+        self.best_response_evaluate(responder, belief, history)
+    }
+
+    fn exploitability(&mut self, iters: usize) -> f64 {
+        let boards: Vec<_> = (0..iters).map(|_| Board::new()).collect();
+        let mut history: SmallVec<[Action; MAX_ACTION_LENGTH]> = SmallVec::new();
+        Player::ALL
+            .into_iter()
+            .map(|p| self.best_response(p, &boards, &mut history))
+            .sum::<f64>()
+            / 2.0
+    }
+
     pub fn solve(&mut self, iters: usize) {
         let mut history: SmallVec<[Action; MAX_ACTION_LENGTH]> = SmallVec::new();
-        for iter in 0..iters {
-            println!("info cfr iter {}", iter);
+
+        let target = self.iters + iters;
+        while self.iters < target {
+            println!("info cfr iter {}", self.iters);
             let board = Board::new();
-            for p in Player::ALL {
-                let reach_prob = [1.0; Player::COUNT];
-                self.cfr(p, &reach_prob, &board, &mut history);
+            let reach_prob = [1.0; Player::COUNT];
+            self.cfr(&reach_prob, &board, &mut history);
+
+            if self.iters % 10 == 0 {
+                println!("info cfr exploitability {:.5}", self.exploitability(100));
             }
+
+            self.iters += 1;
         }
     }
 }
