@@ -46,7 +46,7 @@ where
     }
 }
 
-fn to_cdf(pdf: &[f32]) -> Vec<f32> {
+pub fn to_cdf(pdf: &[f32]) -> Vec<f32> {
     let mut cumul = 0.0;
     let mut out = vec![0.0; pdf.len()];
     for (i, x) in pdf.iter().enumerate() {
@@ -57,7 +57,7 @@ fn to_cdf(pdf: &[f32]) -> Vec<f32> {
     out
 }
 
-fn to_pdf(cdf: &[f32]) -> Vec<f32> {
+pub fn to_pdf(cdf: &[f32]) -> Vec<f32> {
     let mut delta = vec![0.0; cdf.len()];
     for (i, x) in cdf.iter().enumerate() {
         let prev = if i == 0 { 0.0 } else { cdf[i - 1] };
@@ -71,7 +71,7 @@ const SIMULATE_HOLE_ITERS: usize = 100;
 const SIMULATE_COMMUNITY_ITERS: usize = 100;
 const KMEANS_ITERS: usize = 200;
 
-fn simulate_equity(
+pub fn simulate_equity(
     hand: CardSet,
     community: CardSet,
     bins: usize,

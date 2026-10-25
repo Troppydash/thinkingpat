@@ -209,6 +209,25 @@ impl Board {
         self.stm
     }
 
+    pub fn pot(&self) -> i16 {
+        self.pot_in_sb
+    }
+
+    pub fn cost(&self, action: Action) -> i16 {
+        match action {
+            Action::Fold => 0,
+            Action::Call => {
+                self.raises_this_street_in_sb[!self.stm as usize]
+                    - self.raises_this_street_in_sb[self.stm as usize]
+            }
+            Action::Raise(amount) => {
+                self.raises_this_street_in_sb[!self.stm as usize]
+                    - self.raises_this_street_in_sb[self.stm as usize]
+                    + amount
+            }
+        }
+    }
+
     fn bet(&mut self, player: Player, amount: i16) {
         self.cash_in_sb[player as usize] -= amount;
         self.pot_in_sb += amount;

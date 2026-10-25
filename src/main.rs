@@ -71,6 +71,21 @@ fn test0(filename: &str, street_groups: &[&str], iters: usize) {
     arena.play(iters);
 }
 
+fn test1(filename: &str, street_groups: &[&str], iters: usize) {
+    let solver = Solver::load(filename, |street| {
+        if street == Street::Preflop {
+            return Box::new(SuitIndex::new(2, 0));
+        }
+
+        let filename = street_groups[street as usize];
+        println!("info street {} filename {}", street.to_string(), filename);
+        Box::new(Equity::load(filename))
+    });
+    let cfr = Cfr::new(solver);
+    let mut arena = Arena::new([Box::new(cfr), Box::new(bot::equity::Equity)]);
+    arena.play(iters);
+}
+
 fn ui(args: Vec<String>) {
     let process_line = |line: &String| -> () {
         let parts: Vec<_> = line.split_whitespace().collect();
@@ -118,6 +133,15 @@ fn ui(args: Vec<String>) {
                         .map(|street| parts[3 + street as usize])
                         .collect();
                     test0(filename, &street_groups, iters);
+                }
+                "test1" => {
+                    let iters: usize = parts[1].parse().unwrap();
+                    let filename = parts[2];
+                    let street_groups: Vec<&str> = Street::ALL
+                        .into_iter()
+                        .map(|street| parts[3 + street as usize])
+                        .collect();
+                    test1(filename, &street_groups, iters);
                 }
                 _ => {
                     panic!("");
