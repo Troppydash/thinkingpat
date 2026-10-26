@@ -14,14 +14,20 @@ use crate::{
         card::CardSet,
     },
     group::group::Group,
+    solver::cache::Cache,
 };
 
-pub const MAX_ACTION_LENGTH: usize = 12;
+pub const MAX_ACTION_LENGTH: usize = 4 * 4;
 pub const MAX_ACTIONS: usize = 3;
 type Actions = [f32; MAX_ACTIONS];
 type Policy = FxHashMap<Infoset, InfosetData>;
 
+// arbitrary 20
+type Belief = SmallVec<[(Board, f64); 20]>;
+
 const CHECKPOINT_BUFFER_SIZE: usize = 64 * 1024;
+
+type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -30,11 +36,6 @@ struct InfosetData {
     regret_sum: Actions,
     strategy_sum: Actions,
 }
-
-// arbitrary 20
-type Belief = SmallVec<[(Board, f64); 20]>;
-
-type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 
 #[repr(C)]
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Default)]
@@ -45,18 +46,6 @@ pub struct Infoset {
     street: u8,
     _padding: [u8; 3],
 }
-
-#[repr(C)]
-#[derive(Default)]
-struct CheckpointEntry {
-    infoset: Infoset,
-    data: InfosetData,
-}
-
-const _: () = assert!(size_of::<Infoset>() == 2 * size_of::<u32>() + 4);
-const _: () = assert!(size_of::<InfosetData>() == 2 * size_of::<Actions>());
-const _: () =
-    assert!(size_of::<CheckpointEntry>() == size_of::<Infoset>() + size_of::<InfosetData>());
 
 impl Infoset {
     fn new(street: Street, group: usize, history: &[Action]) -> Self {
@@ -79,6 +68,18 @@ impl Infoset {
     }
 }
 
+#[repr(C)]
+#[derive(Default)]
+struct CheckpointEntry {
+    infoset: Infoset,
+    data: InfosetData,
+}
+
+const _: () = assert!(size_of::<Infoset>() == 2 * size_of::<u32>() + 4);
+const _: () = assert!(size_of::<InfosetData>() == 2 * size_of::<Actions>());
+const _: () =
+    assert!(size_of::<CheckpointEntry>() == size_of::<Infoset>() + size_of::<InfosetData>());
+
 fn adjust_sign(x: f64, stm: Player, child_stm: Player) -> f64 {
     if stm != child_stm { -x } else { x }
 }
@@ -89,59 +90,59 @@ fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
     Ok(u64::from_le_bytes(bytes))
 }
 
-fn make_board_groups(
-    boards: &[Board],
-    map: &[Box<dyn Group>; Street::COUNT],
-) -> FxHashMap<CardState, BoardGroups> {
-    let mut output: FxHashMap<CardState, BoardGroups> = FxHashMap::default();
-
-    for board in boards.iter() {
-        if output.contains_key(&board.card_state_full()) {
-            continue;
-        }
-
-        let mut groups = [[0; Street::COUNT]; Player::COUNT];
-        let cards = board.card_state_full();
-        for player in Player::ALL {
-            for street in Street::ALL {
-                let group = map[street as usize].map(
-                    cards.hands[player as usize],
-                    CardSet::from_iter(
-                        cards.community[..street.visible_community()]
-                            .iter()
-                            .cloned(),
-                    ),
-                );
-
-                if street == Street::Preflop {
-                    groups[player as usize][street as usize] = group;
-                } else {
-                    groups[player as usize][street as usize] = group
-                        + groups[player as usize][street as usize - 1]
-                            * map[street as usize].size();
-                }
-            }
-        }
-
-        output.insert(board.card_state_full(), groups);
-    }
-
-    output
-}
-
 pub struct Solver {
     infosets: Policy,
     street_groups: [Box<dyn Group>; Street::COUNT],
     iters: usize,
+    cache: Cache,
 }
 
 impl Solver {
     pub fn new(load: impl Fn(Street) -> Box<dyn Group>) -> Self {
+        let cache = Cache::new(&load(Street::Preflop));
         Self {
             infosets: FxHashMap::default(),
             street_groups: Street::ALL.map(load),
             iters: 0,
+            cache,
         }
+    }
+
+    fn make_board_groups(&self, boards: &[Board]) -> FxHashMap<CardState, BoardGroups> {
+        let mut output: FxHashMap<CardState, BoardGroups> = FxHashMap::default();
+
+        for board in boards.iter() {
+            if output.contains_key(&board.card_state_full()) {
+                continue;
+            }
+
+            let mut groups = [[0; Street::COUNT]; Player::COUNT];
+            let cards = board.card_state_full();
+            for player in Player::ALL {
+                for street in Street::ALL {
+                    if street == Street::Preflop {
+                        groups[player as usize][street as usize] =
+                            self.cache.hand_groups[&cards.hands[player as usize]];
+                    } else {
+                        let group = self.street_groups[street as usize].map(
+                            cards.hands[player as usize],
+                            CardSet::from_iter(
+                                cards.community[..street.visible_community()]
+                                    .iter()
+                                    .cloned(),
+                            ),
+                        );
+                        groups[player as usize][street as usize] = group
+                            + groups[player as usize][street as usize - 1]
+                                * self.street_groups[street as usize].size();
+                    }
+                }
+            }
+
+            output.insert(board.card_state_full(), groups);
+        }
+
+        output
     }
 
     #[inline]
@@ -181,7 +182,7 @@ impl Solver {
         &mut self,
         reach_prob: &[f64; Player::COUNT],
         board: &Board,
-        history: &mut SmallVec<[Action; MAX_ACTION_LENGTH]>,
+        history: &mut Vec<Action>,
         board_group: &BoardGroups,
     ) -> f64 {
         // terminal
@@ -364,7 +365,7 @@ impl Solver {
 
     fn exploitability(&mut self, iters: usize) -> f64 {
         let boards: Vec<_> = (0..iters).map(|_| Board::new()).collect();
-        let board_groups = make_board_groups(&boards, &self.street_groups);
+        let board_groups = self.make_board_groups(&boards);
 
         let mut history: SmallVec<[Action; MAX_ACTION_LENGTH]> = SmallVec::new();
         Player::ALL
@@ -375,7 +376,7 @@ impl Solver {
     }
 
     pub fn solve(&mut self, filename: &str, iters: usize) {
-        let mut history: SmallVec<[Action; MAX_ACTION_LENGTH]> = SmallVec::new();
+        let mut history = vec![];
         let states: usize = self.street_groups.iter().map(|s| s.size()).product();
         println!("info cfr states at least {states}");
 
@@ -387,7 +388,8 @@ impl Solver {
             let board = Board::new();
             let reach_prob = [1.0; Player::COUNT];
 
-            let board_groups = make_board_groups(&[board.clone()], &self.street_groups)
+            let board_groups = self
+                .make_board_groups(&[board.clone()])
                 .values()
                 .next()
                 .cloned()

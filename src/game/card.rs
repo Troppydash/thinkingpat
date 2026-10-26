@@ -283,6 +283,33 @@ impl CardSet {
         let community = Self::sample_remain(hand, rng, community);
         (hand, community)
     }
+
+    /// Visits each size-k subset of remain exactly once, in ascending bit order.
+    pub fn iterate_community(remain: CardSet, k: usize, mut f: impl FnMut(CardSet)) {
+        // edge cases
+        let n = remain.len();
+        if k > n {
+            return;
+        }
+        if k == 0 {
+            f(CardSet::EMPTY);
+            return;
+        }
+
+        let mut mask = u64::MAX >> (64 - k);
+        let end_mask = mask << (n - k);
+        loop {
+            f(CardSet(bits::pdep(mask, remain.0)));
+            if mask == end_mask {
+                break;
+            }
+
+            // Gosper's hack advances combinations in the dense n-bit space.
+            let c = mask & mask.wrapping_neg();
+            let r = mask.wrapping_add(c);
+            mask = r | (((r ^ mask) >> 2) / c);
+        }
+    }
 }
 
 impl From<Card> for CardSet {

@@ -10,7 +10,7 @@ use crate::{
 pub struct Equity;
 
 impl Bot for Equity {
-    fn play(&mut self, board: &Board, _history: &[Action]) -> Action {
+    fn play(&mut self, board: &Board, history: &[Action]) -> Action {
         let card = board.card_state();
         let hand = card.hands[board.stm() as usize];
         let community = CardSet::from_iter(
@@ -26,6 +26,19 @@ impl Bot for Equity {
             .map(|(i, x)| x * i as f32 / bins as f32)
             .sum();
 
+        let raises = history
+            .iter()
+            .filter(|x| match *x {
+                Action::Fold => false,
+                Action::Call => false,
+                Action::Raise(_) => true,
+            })
+            .cloned()
+            .collect::<Vec<Action>>()
+            .len();
+
+        let fade = 0.01 * raises as f32;
+
         let pot = board.pot();
         let mut best = f32::NEG_INFINITY;
         let mut best_i = 0;
@@ -33,7 +46,7 @@ impl Bot for Equity {
             let ev = if *action == Action::Fold {
                 0.0
             } else {
-                equity * pot as f32 + (1.0 - equity) * -board.cost(*action) as f32
+                equity * pot as f32 + (1.0 - equity) * -board.cost(*action) as f32 - fade
             };
             if ev > best {
                 best_i = i;

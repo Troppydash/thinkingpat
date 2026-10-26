@@ -16,36 +16,6 @@ use crate::{
     },
 };
 
-/// Visits each size-k subset of remain exactly once, in ascending bit order.
-fn iterate_community<F>(remain: CardSet, k: usize, mut f: F)
-where
-    F: FnMut(CardSet),
-{
-    // edge cases
-    let n = remain.len();
-    if k > n {
-        return;
-    }
-    if k == 0 {
-        f(CardSet::EMPTY);
-        return;
-    }
-
-    let mut mask = u64::MAX >> (64 - k);
-    let end_mask = mask << (n - k);
-    loop {
-        f(CardSet(bits::pdep(mask, remain.0)));
-        if mask == end_mask {
-            break;
-        }
-
-        // Gosper's hack advances combinations in the dense n-bit space.
-        let c = mask & mask.wrapping_neg();
-        let r = mask.wrapping_add(c);
-        mask = r | (((r ^ mask) >> 2) / c);
-    }
-}
-
 pub fn to_cdf(pdf: &[f32]) -> Vec<f32> {
     let mut cumul = 0.0;
     let mut out = vec![0.0; pdf.len()];
@@ -125,7 +95,7 @@ pub fn simulate_equity(
                     count += 1;
                 }
             } else {
-                iterate_community(remain, k, |extra_community| {
+                CardSet::iterate_community(remain, k, |extra_community| {
                     equity += match showdown::winner(hand, opp_hand, community | extra_community) {
                         Some(Player::BB) => 1.0,
                         Some(Player::SB) => 0.0,
@@ -367,7 +337,7 @@ mod tests {
                 expected.reverse();
 
                 let mut actual = Vec::new();
-                iterate_community(CardSet(remain), k, |cards| actual.push(cards.0));
+                CardSet::iterate_community(CardSet(remain), k, |cards| actual.push(cards.0));
                 assert_eq!(actual, expected, "remain={remain:#x}, k={k}");
             }
         }
@@ -376,7 +346,7 @@ mod tests {
     #[test]
     fn full_deck_pairs_and_boundary_sizes() {
         let mut count = 0;
-        iterate_community(CardSet::FULL, 2, |cards| {
+        CardSet::iterate_community(CardSet::FULL, 2, |cards| {
             assert_eq!(cards.len(), 2);
             assert_eq!(cards.0 & !CardSet::FULL.0, 0);
             count += 1;
@@ -385,7 +355,7 @@ mod tests {
 
         for k in [0, 52, 53] {
             let mut actual = Vec::new();
-            iterate_community(CardSet::FULL, k, |cards| actual.push(cards));
+            CardSet::iterate_community(CardSet::FULL, k, |cards| actual.push(cards));
             let expected = match k {
                 0 => vec![CardSet::EMPTY],
                 52 => vec![CardSet::FULL],
