@@ -99,13 +99,40 @@ pub struct Solver {
 
 impl Solver {
     pub fn new(load: impl Fn(Street) -> Box<dyn Group>) -> Self {
-        let cache = Cache::new(&load(Street::Preflop));
+        let street_groups = Street::ALL.map(load);
+        let cache = Cache::new(&street_groups[Street::Preflop as usize]);
         Self {
             infosets: FxHashMap::default(),
-            street_groups: Street::ALL.map(load),
+            street_groups,
             iters: 0,
             cache,
         }
+    }
+
+    fn make_board_group(&self, board: &Board) -> BoardGroups {
+        let mut groups = [[0; Street::COUNT]; Player::COUNT];
+        let cards = board.card_state_full();
+        for player in Player::ALL {
+            for street in Street::ALL {
+                if street == Street::Preflop {
+                    groups[player as usize][street as usize] =
+                        self.cache.hand_groups[&cards.hands[player as usize]];
+                } else {
+                    let group = self.street_groups[street as usize].map(
+                        cards.hands[player as usize],
+                        cards.community[..street.visible_community()]
+                            .iter()
+                            .copied()
+                            .collect(),
+                    );
+                    groups[player as usize][street as usize] = group
+                        + groups[player as usize][street as usize - 1]
+                            * self.street_groups[street as usize].size();
+                }
+            }
+        }
+
+        groups
     }
 
     fn make_board_groups(&self, boards: &[Board]) -> FxHashMap<CardState, BoardGroups> {
@@ -116,28 +143,7 @@ impl Solver {
                 continue;
             }
 
-            let mut groups = [[0; Street::COUNT]; Player::COUNT];
-            let cards = board.card_state_full();
-            for player in Player::ALL {
-                for street in Street::ALL {
-                    if street == Street::Preflop {
-                        groups[player as usize][street as usize] =
-                            self.cache.hand_groups[&cards.hands[player as usize]];
-                    } else {
-                        let group = self.street_groups[street as usize].map(
-                            cards.hands[player as usize],
-                            CardSet::from_iter(
-                                cards.community[..street.visible_community()]
-                                    .iter()
-                                    .cloned(),
-                            ),
-                        );
-                        groups[player as usize][street as usize] = group
-                            + groups[player as usize][street as usize - 1]
-                                * self.street_groups[street as usize].size();
-                    }
-                }
-            }
+            let groups = self.make_board_group(board);
 
             output.insert(board.card_state_full(), groups);
         }
@@ -376,35 +382,35 @@ impl Solver {
     }
 
     pub fn solve(&mut self, filename: &str, iters: usize) {
+        if iters == 0 {
+            return;
+        }
+        std::fs::create_dir_all(filename).unwrap();
         let mut history = vec![];
         let states: usize = self.street_groups.iter().map(|s| s.size()).product();
         println!("info cfr states at least {states}");
 
         let target = self.iters + iters;
         while self.iters < target {
-            if self.iters % 1000 == 0 {
+            if self.iters % 5000 == 0 {
                 println!("info cfr iter {}", self.iters);
             }
             let board = Board::new();
             let reach_prob = [1.0; Player::COUNT];
 
-            let board_groups = self
-                .make_board_groups(&[board.clone()])
-                .values()
-                .next()
-                .cloned()
-                .unwrap();
+            let board_groups = self.make_board_group(&board);
             self.cfr(&reach_prob, &board, &mut history, &board_groups);
+            self.iters += 1;
 
-            if self.iters % 50000 == 0 {
-                println!(
-                    "info cfr exploitability {:.5} sb",
-                    self.exploitability(5000)
-                );
+            if self.iters % 200000 == 0 || self.iters == target {
                 self.save(&format!("{filename}/iter_{}.bin", self.iters));
             }
-
-            self.iters += 1;
+            if self.iters % 200000 == 0 {
+                println!(
+                    "info cfr exploitability {:.5} sb",
+                    self.exploitability(20000)
+                );
+            }
         }
     }
 
@@ -463,11 +469,10 @@ impl Solver {
             group = group * self.street_groups[street].size()
                 + self.street_groups[street].map(
                     hand,
-                    CardSet::from_iter(
-                        card.community[..Street::ALL[street].visible_community()]
-                            .iter()
-                            .cloned(),
-                    ),
+                    card.community[..Street::ALL[street].visible_community()]
+                        .iter()
+                        .cloned()
+                        .collect(),
                 );
         }
 

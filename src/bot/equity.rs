@@ -1,9 +1,6 @@
 use crate::{
     bot::bot::Bot,
-    game::{
-        board::{Action, Board},
-        card::CardSet,
-    },
+    game::board::{Action, Board},
     group::equity::{simulate_equity, to_pdf},
 };
 
@@ -13,11 +10,10 @@ impl Bot for Equity {
     fn play(&mut self, board: &Board, history: &[Action]) -> Action {
         let card = board.card_state();
         let hand = card.hands[board.stm() as usize];
-        let community = CardSet::from_iter(
-            card.community[..board.street().visible_community()]
-                .iter()
-                .cloned(),
-        );
+        let community = card.community[..board.street().visible_community()]
+            .iter()
+            .cloned()
+            .collect();
         let bins = 1000;
         let equity = to_pdf(&simulate_equity(hand, community, bins, 100, Some(100)));
         let equity: f32 = equity
@@ -46,7 +42,14 @@ impl Bot for Equity {
             let ev = if *action == Action::Fold {
                 0.0
             } else {
-                equity * pot as f32 + (1.0 - equity) * -board.cost(*action) as f32 - fade
+                // Assume the opponent calls our extra raise.
+                let matching_bet = match *action {
+                    Action::Raise(amount) => amount,
+                    _ => 0,
+                };
+                equity * (pot + matching_bet) as f32
+                    - (1.0 - equity) * board.cost(*action) as f32
+                    - fade
             };
             if ev > best {
                 best_i = i;

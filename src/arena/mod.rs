@@ -46,15 +46,19 @@ impl Arena {
     pub fn play(&mut self, iters: usize) {
         let mut rng = rand::rng();
 
-        let mut payouts = [0; Player::COUNT];
+        let mut payouts = [0_i64; Player::COUNT];
         for iter in 0..iters {
             let winnings = self.matchup(&mut rng);
             for i in 0..Player::COUNT {
-                payouts[i] += winnings[i];
+                payouts[i] += i64::from(winnings[i]);
             }
 
-            if iter % 1000 == 0 {
-                println!("info iter {iter} average_sb {:?}", payouts[0] as f32 / iter.max(1) as f32);
+            let completed = iter + 1;
+            if completed % 1000 == 0 || completed == iters {
+                println!(
+                    "info iter {completed} average_sb {:?}",
+                    payouts[0] as f64 / completed as f64
+                );
             }
         }
     }

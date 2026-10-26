@@ -158,10 +158,15 @@ pub struct Board {
     raises_this_street_in_sb: [i16; Player::COUNT],
     has_called_this_street: [bool; Player::COUNT],
     outcome: Outcome,
+    showdown: Option<Player>,
 }
 
 impl Board {
     pub fn new() -> Self {
+        Self::with_cards(CardState::new())
+    }
+
+    fn with_cards(presampled: CardState) -> Self {
         let mut cash_in_sb = [CASH_IN_SB; Player::COUNT];
         let mut pot_in_sb = 0;
         let mut raises_this_street_in_sb = [0; Player::COUNT];
@@ -174,8 +179,14 @@ impl Board {
         pot_in_sb += BB_IN_SB;
         raises_this_street_in_sb[Player::BB as usize] = BB_IN_SB;
 
+        let showdown = showdown::winner(
+            presampled.hands[Player::BB as usize],
+            presampled.hands[Player::SB as usize],
+            presampled.community.iter().copied().collect(),
+        );
+
         Self {
-            presampled: CardState::new(),
+            presampled,
             street: Street::Preflop,
             stm: Player::SB,
             cash_in_sb,
@@ -184,6 +195,7 @@ impl Board {
             raises_this_street_in_sb,
             has_called_this_street: [false; Player::COUNT],
             outcome: Outcome::Ongoing,
+            showdown,
         }
     }
 
@@ -255,14 +267,6 @@ impl Board {
         actions
     }
 
-    fn showdown(&self) -> Option<Player> {
-        showdown::winner(
-            self.presampled.hands[Player::BB as usize],
-            self.presampled.hands[Player::SB as usize],
-            self.presampled.community.iter().copied().collect(),
-        )
-    }
-
     pub fn play(&mut self, action: Action) {
         debug_assert!(matches!(self.outcome, Outcome::Ongoing));
 
@@ -303,7 +307,7 @@ impl Board {
                         None => {
                             // showdown
                             self.street = Street::River;
-                            match self.showdown() {
+                            match self.showdown {
                                 None => {
                                     self.outcome = Outcome::Winnings([0, 0]);
                                 }
@@ -360,6 +364,12 @@ mod tests {
             ],
             community: cards[4..].try_into().unwrap(),
         }
+    }
+
+    fn set_cards(board: &mut Board, text: &str) {
+        let dealt = Board::with_cards(parse_card_state(text));
+        board.presampled = dealt.presampled;
+        board.showdown = dealt.showdown;
     }
 
     fn street_board(street: Street) -> Board {
@@ -541,7 +551,7 @@ mod tests {
     #[test]
     fn river_all_in_call_resolves_the_entire_pot() {
         let mut board = street_board(Street::River);
-        board.presampled = parse_card_state("Ah Ad Kh Kd 2s 4c 7h 9d Js");
+        set_cards(&mut board, "Ah Ad Kh Kd 2s 4c 7h 9d Js");
         board.cash_in_sb = [2, 0];
         board.pot_in_sb = CASH_IN_SB * 2 - 2;
         board.raises_this_street_in_sb = [0, BB_IN_SB];
@@ -579,7 +589,7 @@ mod tests {
             ("2h 3d 4h 5d As Ks Qs Js Ts", [0, 0]),
         ] {
             let mut board = street_board(Street::River);
-            board.presampled = parse_card_state(cards);
+            set_cards(&mut board, cards);
             board.cash_in_sb = [CASH_IN_SB - 10; Player::COUNT];
             board.pot_in_sb = 20;
             board.play(Action::Call);
@@ -593,7 +603,7 @@ mod tests {
     #[test]
     fn a_checked_down_hand_returns_the_losers_full_contribution() {
         let mut board = Board::new();
-        board.presampled = parse_card_state("Ah Ad Kh Kd 2s 4c 7h 9d Js");
+        set_cards(&mut board, "Ah Ad Kh Kd 2s 4c 7h 9d Js");
         for _ in 0..8 {
             board.play(Action::Call);
         }
@@ -656,7 +666,7 @@ mod tests {
             ("2h 3d 4h 5d As Ks Qs Js Ts", [0, 0]),
         ] {
             let mut board = Board::new();
-            board.presampled = parse_card_state(cards);
+            set_cards(&mut board, cards);
             for (street, actions) in [
                 (
                     Street::Preflop,
@@ -695,7 +705,7 @@ mod tests {
     fn matched_all_in_before_river_runs_out_the_board() {
         for street in [Street::Flop, Street::Turn] {
             let mut board = street_board(street);
-            board.presampled = parse_card_state("Ah Ad Kh Kd 2s 4c 7h 9d Js");
+            set_cards(&mut board, "Ah Ad Kh Kd 2s 4c 7h 9d Js");
             let amount = board.raise_amount();
             board.cash_in_sb = [amount; Player::COUNT];
             board.pot_in_sb = CASH_IN_SB * 2 - amount * 2;
