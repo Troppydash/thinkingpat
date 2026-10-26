@@ -41,9 +41,9 @@ fn compute_equity_group(
 
 fn cfr_solve(filename: &str, street_groups: &[&str], iters: usize) {
     let mut solver = Solver::new(|street| {
-        if street == Street::Preflop {
-            return Box::new(SuitIndex::new(2, 0));
-        }
+        // if street == Street::Preflop {
+        //     return Box::new(SuitIndex::new(2, 0));
+        // }
 
         // if street == Street::Flop {
         //     return Box::new(SuitIndex::new(2, 3));
@@ -58,9 +58,9 @@ fn cfr_solve(filename: &str, street_groups: &[&str], iters: usize) {
 
 fn test0(filename: &str, street_groups: &[&str], iters: usize) {
     let solver = Solver::load(filename, |street| {
-        if street == Street::Preflop {
-            return Box::new(SuitIndex::new(2, 0));
-        }
+        // if street == Street::Preflop {
+        //     return Box::new(SuitIndex::new(2, 0));
+        // }
 
         let filename = street_groups[street as usize];
         println!("info street {} filename {}", street.to_string(), filename);
@@ -73,9 +73,9 @@ fn test0(filename: &str, street_groups: &[&str], iters: usize) {
 
 fn test1(filename: &str, street_groups: &[&str], iters: usize) {
     let solver = Solver::load(filename, |street| {
-        if street == Street::Preflop {
-            return Box::new(SuitIndex::new(2, 0));
-        }
+        // if street == Street::Preflop {
+        //     return Box::new(SuitIndex::new(2, 0));
+        // }
 
         let filename = street_groups[street as usize];
         println!("info street {} filename {}", street.to_string(), filename);

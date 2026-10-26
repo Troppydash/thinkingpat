@@ -5,6 +5,7 @@ use std::{
 };
 
 use fxhash::FxHashMap;
+use rand::RngExt;
 use smallvec::SmallVec;
 
 use crate::{
@@ -148,7 +149,7 @@ impl Solver {
         let regrets = &self.infosets.entry(infoset.clone()).or_default().regret_sum;
         let total: f64 = regrets[..actions].iter().map(|x| x.max(0.0) as f64).sum();
         let mut strategy = [0.0; MAX_ACTIONS];
-        if total < f64::EPSILON {
+        if total < f64::EPSILON || rand::rng().random_ratio(1, 10000) {
             strategy[..actions].fill(1.0 / actions as f32);
         } else {
             for i in 0..actions {
@@ -188,6 +189,11 @@ impl Solver {
             return winnings[board.stm() as usize] as f64;
         }
 
+        // prune
+        if reach_prob.iter().all(|&p| p < f64::EPSILON) {
+            return 0.0;
+        }
+
         let infoset = Infoset::new(
             board.street(),
             board_group[board.stm() as usize][board.street() as usize],
@@ -220,6 +226,8 @@ impl Solver {
             .enumerate()
             .map(|(i, v)| strategy[i] as f64 * v)
             .sum();
+
+        // TODO: optimize this via cut/prune
 
         // regret sum update
         let data = self.infosets.get_mut(&infoset).unwrap();

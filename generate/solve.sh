@@ -1,1 +1,1 @@
-cargo run -r -- "cfr solve 10000000 ./data/checkpoint/$1/ ./data/equity/preflop.bin ./data/equity/flop.bin ./data/equity/turn.bin ./data/equity/river.bin"
+cargo run -r -- "cfr solve 10000000 ./data/checkpoint/$2/ ./data/equity/$1/preflop.bin ./data/equity/$1/flop.bin ./data/equity/$1/turn.bin ./data/equity/$1/river.bin"
