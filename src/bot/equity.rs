@@ -33,7 +33,7 @@ impl Bot for Equity {
             .collect::<Vec<Action>>()
             .len();
 
-        let fade = 0.01 * raises as f32;
+        let fade = 0.9 * raises as f32;
 
         let pot = board.pot();
         let mut best = f32::NEG_INFINITY;
@@ -44,10 +44,10 @@ impl Bot for Equity {
             } else {
                 // Assume the opponent calls our extra raise.
                 let matching_bet = match *action {
-                    Action::Raise(amount) => amount,
-                    _ => 0,
+                    Action::Raise(amount) => amount as f32,
+                    _ => 0.0,
                 };
-                equity * (pot + matching_bet) as f32
+                equity * (pot as f32 + matching_bet)
                     - (1.0 - equity) * board.cost(*action) as f32
                     - fade
             };

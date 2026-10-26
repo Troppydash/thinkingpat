@@ -2,19 +2,30 @@ use rand::{Rng, RngExt};
 
 use crate::{
     bot::bot::Bot,
-    game::board::{Board, Outcome, Player},
+    game::{
+        board::{Board, Outcome, Player},
+        card::CardSet,
+    },
 };
 
 pub struct Arena {
     players: [Box<dyn Bot>; Player::COUNT],
+    verbose: bool,
 }
 
 impl Arena {
     pub fn new(players: [Box<dyn Bot>; Player::COUNT]) -> Self {
-        Self { players }
+        Self {
+            players,
+            verbose: false,
+        }
     }
 
     fn matchup(&mut self, rng: &mut impl Rng) -> [i32; Player::COUNT] {
+        if self.verbose {
+            println!();
+        }
+
         for player in self.players.iter_mut() {
             player.reset();
         }
@@ -29,6 +40,23 @@ impl Arena {
                 self.players[1].play(&board, &history)
             };
 
+            if self.verbose {
+                let cards = board.card_state_full();
+                println!(
+                    "info board {} | {} ",
+                    cards.hands[board.stm() as usize].to_string(),
+                    cards.community[0..board.street().visible_community()]
+                        .iter()
+                        .cloned()
+                        .collect::<CardSet>()
+                        .to_string()
+                );
+                println!(
+                    "info player {} action {:?}",
+                    if p0_stm == board.stm() { "p0" } else { "p1" },
+                    action
+                );
+            }
             history.push(action);
             board.play(action);
         }
@@ -36,6 +64,10 @@ impl Arena {
         let Outcome::Winnings(winnings) = board.outcome() else {
             unreachable!()
         };
+
+        if self.verbose {
+            println!("info p0 winnings {}", winnings[p0_stm as usize]);
+        }
 
         [
             winnings[p0_stm as usize] as i32,

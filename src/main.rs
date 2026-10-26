@@ -5,7 +5,10 @@ use rustyline::DefaultEditor;
 
 use crate::{
     arena::Arena,
-    bot::{cfr::Cfr, random::Random},
+    bot::{
+        cfr::Cfr,
+        random::{Caller, Raiser, Random},
+    },
     game::board::Street,
     group::{equity::Equity, index::SuitIndex},
     solver::engine::Solver,
