@@ -10,6 +10,7 @@ use rand::{
     Rng, RngExt,
     distr::{Distribution, weighted::WeightedIndex},
 };
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 use crate::{
@@ -30,65 +31,21 @@ use crate::{
 pub const MAX_ACTION_LENGTH: usize = 4 * 5;
 pub const MAX_ACTIONS: usize = 3;
 type Actions = [f32; MAX_ACTIONS];
-type Policy = FxHashMap<Infoset, InfosetData>;
 
 // arbitrary 20
-type Belief = SmallVec<[(Board, f64); 20]>;
+type Belief = Vec<(Board, f64)>;
 
 const CHECKPOINT_BUFFER_SIZE: usize = 64 * 1024;
 
 type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 
 #[repr(C)]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Serialize, Deserialize)]
 struct InfosetData {
     // TODO: consider fixed point
     regret_sum: Actions,
     strategy_sum: Actions,
 }
-
-#[repr(C)]
-#[derive(Hash, PartialEq, Eq, Clone, Copy, Default)]
-pub struct Infoset {
-    // this is the mixed radix group index
-    group: u32,
-    history: u32,
-    street: u8,
-    _padding: [u8; 3],
-}
-
-impl Infoset {
-    fn new(street: Street, group: usize, history: &[Action]) -> Self {
-        let mut compressed_history = 1u32 << history.len();
-
-        for (i, action) in history.iter().enumerate() {
-            match *action {
-                Action::Fold => panic!("unexpected fold"),
-                Action::Call => compressed_history |= 1 << i,
-                Action::Raise(_) => {}
-            }
-        }
-
-        Self {
-            street: street as u8,
-            group: u32::try_from(group).expect("group index exceeds u32"),
-            history: compressed_history,
-            _padding: [0; 3],
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Default)]
-struct CheckpointEntry {
-    infoset: Infoset,
-    data: InfosetData,
-}
-
-const _: () = assert!(size_of::<Infoset>() == 2 * size_of::<u32>() + 4);
-const _: () = assert!(size_of::<InfosetData>() == 2 * size_of::<Actions>());
-const _: () =
-    assert!(size_of::<CheckpointEntry>() == size_of::<Infoset>() + size_of::<InfosetData>());
 
 fn adjust_sign(x: f64, stm: Player, child_stm: Player) -> f64 {
     if stm != child_stm { -x } else { x }
@@ -124,8 +81,17 @@ pub fn create_groups(path: &str) -> [Box<dyn Group>; Street::COUNT] {
     })
 }
 
+/// Note that the history is encapsulated in the children *pointers
+#[derive(Clone, Serialize, Deserialize)]
+struct BettingNode {
+    // indices of action childs
+    children: [Option<usize>; MAX_ACTIONS],
+    // group indexed
+    policy: Vec<InfosetData>,
+}
+
 pub struct Solver {
-    infosets: Policy,
+    nodes: Vec<BettingNode>,
     street_groups: [Box<dyn Group>; Street::COUNT],
     iters: usize,
 }
@@ -133,10 +99,18 @@ pub struct Solver {
 impl Solver {
     pub fn new(path: &str) -> Self {
         Self {
-            infosets: FxHashMap::default(),
+            nodes: vec![],
             street_groups: create_groups(path),
             iters: 0,
         }
+    }
+
+    fn estimate_memory(&self) -> usize {
+        self.street_groups
+            .iter()
+            .map(|g| g.size())
+            .product::<usize>()
+            * (2usize.pow(3 * 4))
     }
 
     fn make_board_group(&self, board: &Board) -> BoardGroups {
@@ -183,9 +157,41 @@ impl Solver {
         output
     }
 
+    fn traverse(&mut self, board: &Board) -> Option<usize> {
+        if board.outcome() != Outcome::Ongoing {
+            return None;
+        }
+
+        let groups: usize = Street::ALL
+            .iter()
+            .filter(|&s| s <= &board.street())
+            .map(|&s| self.street_groups[s as usize].size())
+            .product();
+        let node_id = self.nodes.len();
+        self.nodes.push(BettingNode {
+            children: [None; MAX_ACTIONS],
+            policy: vec![InfosetData::default(); groups],
+        });
+
+        let actions = board.get_actions();
+        for (i, action) in actions.iter().enumerate() {
+            let mut new_board = board.clone();
+            new_board.play(*action);
+            self.nodes[node_id].children[i] = self.traverse(&new_board);
+        }
+
+        Some(node_id)
+    }
+
+    fn make_betting_tree(&mut self) {
+        self.nodes.clear();
+        self.nodes.reserve(self.estimate_memory());
+        self.traverse(&Board::new());
+    }
+
     #[inline]
-    fn regret_matching(&mut self, infoset: &Infoset, actions: usize) -> Actions {
-        let regrets = &self.infosets.entry(infoset.clone()).or_default().regret_sum;
+    fn regret_matching(&mut self, data: &InfosetData, actions: usize) -> Actions {
+        let regrets = &data.regret_sum;
         let total: f64 = regrets[..actions].iter().map(|x| x.max(0.0) as f64).sum();
         let mut strategy = [0.0; MAX_ACTIONS];
         if total < f64::EPSILON || rand::rng().random_ratio(1, 10000) {
@@ -199,11 +205,8 @@ impl Solver {
     }
 
     #[inline]
-    pub fn average_strategy(&self, infoset: &Infoset, actions: usize) -> Actions {
-        let strategies = self
-            .infosets
-            .get(infoset)
-            .map_or([0.0; MAX_ACTIONS], |data| data.strategy_sum);
+    fn average_strategy(&self, data: &InfosetData, actions: usize) -> Actions {
+        let strategies = &data.strategy_sum;
         let total: f64 = strategies[..actions].iter().map(|x| *x as f64).sum();
         let mut strategy = [0.0; MAX_ACTIONS];
         if total < f64::EPSILON {
@@ -220,7 +223,7 @@ impl Solver {
         &mut self,
         reach_prob: &[f64; Player::COUNT],
         board: &Board,
-        history: &mut ArrayVec<Action, MAX_ACTION_LENGTH>,
+        node: Option<usize>,
         board_group: &BoardGroups,
     ) -> f64 {
         // terminal
@@ -228,36 +231,32 @@ impl Solver {
             return winnings[board.stm() as usize] as f64;
         }
 
+        let node = node.unwrap();
+
         // prune
         if reach_prob.iter().all(|&p| p < f64::EPSILON) {
             return 0.0;
         }
 
-        let infoset = Infoset::new(
-            board.street(),
-            board_group[board.stm() as usize][board.street() as usize],
-            &history,
-        );
-
         let actions = board.get_actions();
-        let strategy = self.regret_matching(&infoset, actions.len());
+        let group = board_group[board.stm() as usize][board.street() as usize];
+        let data = self.nodes[node].policy[group];
+        let strategy = self.regret_matching(&data, actions.len());
 
         let mut counterfactual_value = [0.0_f64; MAX_ACTIONS];
         for (i, action) in actions.iter().enumerate() {
             let mut new_board = board.clone();
             new_board.play(*action);
 
-            history.push(*action);
-
             let mut reach_prob = reach_prob.clone();
             reach_prob[board.stm() as usize] *= strategy[i] as f64;
 
+            let child_node = self.nodes[node].children[i];
             counterfactual_value[i] = adjust_sign(
-                self.cfr(&reach_prob, &new_board, history, board_group),
+                self.cfr(&reach_prob, &new_board, child_node, board_group),
                 board.stm(),
                 new_board.stm(),
             );
-            history.pop();
         }
 
         let value: f64 = counterfactual_value
@@ -269,9 +268,11 @@ impl Solver {
         // TODO: optimize this via cut/prune
 
         // regret sum update
-        let data = self.infosets.get_mut(&infoset).unwrap();
+        let data = &mut self.nodes[node].policy[group];
         for i in 0..actions.len() {
             let opp_reach_prob = reach_prob[!board.stm() as usize];
+
+            // CFR+
             data.regret_sum[i] = (data.regret_sum[i]
                 + (opp_reach_prob * (counterfactual_value[i] - value)) as f32)
                 .max(0.0);
@@ -281,7 +282,7 @@ impl Solver {
         return value;
     }
 
-    fn mc_cfr(
+    /* fn mc_cfr(
         &mut self,
         responder: Player,
         board: &Board,
@@ -349,14 +350,14 @@ impl Solver {
         }
 
         return value;
-    }
+    } */
 
     fn best_response_evaluate(
         &mut self,
         responder: Player,
         // weights are all !responder multiplied
         belief: Belief,
-        history: &mut SmallVec<[Action; MAX_ACTION_LENGTH]>,
+        node: Option<usize>,
         board_groups: &FxHashMap<CardState, BoardGroups>,
     ) -> f64 {
         // all the boards are synced
@@ -386,17 +387,15 @@ impl Solver {
         );
 
         // group boards by infosets
-        let mut infosets: FxHashMap<Infoset, Belief> = FxHashMap::default();
+        let mut infosets: FxHashMap<usize, Belief> = FxHashMap::default();
         for (board, weight) in belief {
-            let infoset = Infoset::new(
-                board.street(),
-                board_groups[&board.card_state_full()][board.stm() as usize]
-                    [board.street() as usize],
-                &history,
-            );
+            let group = board_groups[&board.card_state_full()][board.stm() as usize]
+                [board.street() as usize];
 
-            infosets.entry(infoset).or_default().push((board, weight));
+            infosets.entry(group).or_default().push((board, weight));
         }
+
+        let node = node.unwrap();
 
         if stm == responder {
             infosets
@@ -405,7 +404,7 @@ impl Solver {
                     assert!(!states.is_empty());
 
                     let mut total = f64::NEG_INFINITY;
-                    for action in actions.iter() {
+                    for (i, action) in actions.iter().enumerate() {
                         let children = states
                             .iter()
                             .map(|(board, weight)| {
@@ -414,10 +413,14 @@ impl Solver {
                                 (child, *weight)
                             })
                             .collect();
-                        history.push(*action);
-                        let value =
-                            self.best_response_evaluate(responder, children, history, board_groups);
-                        history.pop();
+
+                        let child_node = self.nodes[node].children[i];
+                        let value = self.best_response_evaluate(
+                            responder,
+                            children,
+                            child_node,
+                            board_groups,
+                        );
 
                         total = total.max(value);
                     }
@@ -427,11 +430,11 @@ impl Solver {
                 .sum()
         } else {
             // non responder doesn't partition by infoset because that is private information
-            let mut children: SmallVec<[Belief; MAX_ACTIONS]> =
-                (0..actions.len()).map(|_| SmallVec::new()).collect();
-            for (infoset, states) in infosets {
-                let strategy = self.average_strategy(&infoset, actions.len());
-                for (board, weight) in states {
+            let mut children: [Belief; MAX_ACTIONS] = [const { vec![] }; MAX_ACTIONS];
+            for (group, states) in infosets {
+                let strategy =
+                    self.average_strategy(&self.nodes[node].policy[group], actions.len());
+                for (board, weight) in states.iter() {
                     for (i, action) in actions.iter().enumerate() {
                         let child_weight = weight * strategy[i] as f64;
                         if child_weight > 0.0 {
@@ -444,13 +447,12 @@ impl Solver {
             }
 
             let mut total = 0.0;
-            for (action, states) in actions.iter().zip(children) {
+            for (i, (action, states)) in actions.iter().zip(children).enumerate() {
                 if states.is_empty() {
                     continue;
                 }
-                history.push(*action);
-                total += self.best_response_evaluate(responder, states, history, board_groups);
-                history.pop();
+                let child_node = self.nodes[node].children[i];
+                total += self.best_response_evaluate(responder, states, child_node, board_groups);
             }
             total
         }
@@ -460,7 +462,6 @@ impl Solver {
         &mut self,
         responder: Player,
         boards: &[Board],
-        history: &mut SmallVec<[Action; MAX_ACTION_LENGTH]>,
         board_groups: &FxHashMap<CardState, BoardGroups>,
     ) -> f64 {
         let chance_weight = 1.0 / boards.len() as f64;
@@ -468,17 +469,16 @@ impl Solver {
             .iter()
             .map(|board| (board.clone(), chance_weight))
             .collect();
-        self.best_response_evaluate(responder, belief, history, board_groups)
+        self.best_response_evaluate(responder, belief, Some(0), board_groups)
     }
 
     fn exploitability(&mut self, iters: usize) -> f64 {
         let boards: Vec<_> = (0..iters).map(|_| Board::new()).collect();
         let board_groups = self.make_board_groups(&boards);
 
-        let mut history: SmallVec<[Action; MAX_ACTION_LENGTH]> = SmallVec::new();
         Player::ALL
             .into_iter()
-            .map(|p| self.best_response(p, &boards, &mut history, &board_groups))
+            .map(|p| self.best_response(p, &boards, &board_groups))
             .sum::<f64>()
             / 2.0
     }
@@ -489,11 +489,17 @@ impl Solver {
         }
 
         std::fs::create_dir_all(filename).unwrap();
-        let mut history: ArrayVec<Action, MAX_ACTION_LENGTH> = ArrayVec::new();
-        let states: usize = self.street_groups.iter().map(|s| s.size()).product();
-        println!("info cfr states at least {states}");
+        println!(
+            "info cfr estimate_memory {}mb",
+            self.estimate_memory() / 1024 / 1024
+        );
 
-        let mut rng = rand::rng();
+        if self.nodes.is_empty() {
+            println!("info cfr making betting tree");
+            self.make_betting_tree();
+        }
+
+        // let mut rng = rand::rng();
 
         let target = self.iters + iters;
         while self.iters < target {
@@ -503,7 +509,7 @@ impl Solver {
             let board = Board::new();
             let board_groups = self.make_board_group(&board);
             let reach_prob = [1.0; Player::COUNT];
-            self.cfr(&reach_prob, &board, &mut history, &board_groups);
+            self.cfr(&reach_prob, &board, Some(0), &board_groups);
             // for player in Player::ALL {
             //     self.mc_cfr(player, &board, &mut history, &board_groups, &mut rng);
             // }
@@ -526,21 +532,13 @@ impl Solver {
         let mut writer =
             BufWriter::with_capacity(CHECKPOINT_BUFFER_SIZE, File::create(filename).unwrap());
         writer
-            .write_all(&(self.infosets.len() as u64).to_le_bytes())
+            .write_all(&(self.nodes.len() as u64).to_le_bytes())
             .unwrap();
 
-        for (infoset, data) in &self.infosets {
-            let record = CheckpointEntry {
-                infoset: *infoset,
-                data: *data,
-            };
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    (&record as *const CheckpointEntry).cast::<u8>(),
-                    size_of::<CheckpointEntry>(),
-                )
-            };
-            writer.write_all(bytes).unwrap();
+        for data in &self.nodes {
+            let raw = postcard::to_allocvec(data).unwrap();
+            writer.write_all(&(raw.len() as u64).to_le_bytes()).unwrap();
+            writer.write_all(&raw).unwrap();
         }
 
         writer.flush().unwrap()
@@ -549,42 +547,42 @@ impl Solver {
     pub fn load(filename: &str, path: &str) -> Self {
         let mut reader =
             BufReader::with_capacity(CHECKPOINT_BUFFER_SIZE, File::open(filename).unwrap());
+
         let mut solver = Self::new(path);
-        let count = read_u64(&mut reader).unwrap() as usize;
-        solver.infosets.try_reserve(count).unwrap();
 
+        let count = usize::try_from(read_u64(&mut reader).unwrap()).unwrap();
+        solver.nodes.reserve_exact(count);
+
+        let mut bytes = vec![];
         for _ in 0..count {
-            let mut record = CheckpointEntry::default();
+            let size = usize::try_from(read_u64(&mut reader).unwrap()).unwrap();
+            bytes.resize(size, 0);
+            reader.read_exact(&mut bytes).unwrap();
 
-            let bytes = unsafe {
-                std::slice::from_raw_parts_mut(
-                    (&mut record as *mut CheckpointEntry).cast::<u8>(),
-                    size_of::<CheckpointEntry>(),
-                )
-            };
-            reader.read_exact(bytes).unwrap();
-            solver.infosets.insert(record.infoset, record.data);
+            let node = postcard::from_bytes(&bytes).unwrap();
+            solver.nodes.push(node);
         }
 
         solver
     }
 
     pub fn lookup(&mut self, board: &Board, history: &[Action]) -> Actions {
-        let card = board.card_state();
-        let hand = card.hands[board.stm() as usize];
-        let mut group = self.street_groups[Street::Preflop as usize].map(hand, CardSet::EMPTY);
-        for street in 1..=(board.street() as usize) {
-            group = group * self.street_groups[street].size()
-                + self.street_groups[street].map(
-                    hand,
-                    card.community[..Street::ALL[street].visible_community()]
-                        .iter()
-                        .cloned()
-                        .collect(),
-                );
-        }
+        todo!()
+        // let card = board.card_state();
+        // let hand = card.hands[board.stm() as usize];
+        // let mut group = self.street_groups[Street::Preflop as usize].map(hand, CardSet::EMPTY);
+        // for street in 1..=(board.street() as usize) {
+        //     group = group * self.street_groups[street].size()
+        //         + self.street_groups[street].map(
+        //             hand,
+        //             card.community[..Street::ALL[street].visible_community()]
+        //                 .iter()
+        //                 .cloned()
+        //                 .collect(),
+        //         );
+        // }
 
-        let infoset = Infoset::new(board.street(), group, history);
-        self.average_strategy(&infoset, board.get_actions().len())
+        // let infoset = Infoset::new(board.street(), group, history);
+        // self.average_strategy(&infoset, board.get_actions().len())
     }
 }

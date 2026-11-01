@@ -70,7 +70,7 @@ fn test_equity(filename: &str, path: &str, iters: usize) {
 }
 
 fn ui(args: Vec<String>) {
-    let process_line = |line: &String| -> () {
+    let process_line = |line: &String| -> bool {
         let parts: Vec<_> = line.split_whitespace().collect();
         let command = parts[0];
         let parts = &parts[1..];
@@ -78,6 +78,9 @@ fn ui(args: Vec<String>) {
         match command {
             "hi" => {
                 println!("info Hello");
+            }
+            "quit" => {
+                return true;
             }
             "group" => match parts[0] {
                 "equity" => {
@@ -91,9 +94,9 @@ fn ui(args: Vec<String>) {
             },
             "cfr" => match parts[0] {
                 "solve" => {
-                    let iters: usize = parts[1].parse().unwrap();
+                    let path = parts[1];
                     let filename = parts[2];
-                    let path = parts[3];
+                    let iters: usize = parts[3].parse().unwrap();
                     cfr_solve(filename, path, iters);
                 }
                 _ => {
@@ -127,10 +130,14 @@ fn ui(args: Vec<String>) {
                 println!("warn unknown command {}", command);
             }
         }
+
+        false
     };
 
     for arg in args.iter().skip(1) {
-        process_line(arg);
+        if process_line(arg) {
+            return;
+        }
     }
 
     let mut rl = DefaultEditor::new().unwrap();
@@ -144,7 +151,9 @@ fn ui(args: Vec<String>) {
         };
 
         rl.add_history_entry(&line).unwrap();
-        process_line(&line);
+        if process_line(&line) {
+            break;
+        }
     }
 }
 
