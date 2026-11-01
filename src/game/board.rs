@@ -4,6 +4,7 @@ use std::{
     str::FromStr,
 };
 
+use arrayvec::ArrayVec;
 use rand::{rngs::ThreadRng, seq::index};
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
@@ -252,10 +253,11 @@ impl Board {
         }
     }
 
-    pub fn get_actions(&self) -> SmallVec<[Action; 3]> {
+    pub fn get_actions(&self) -> ArrayVec<Action, 3> {
         debug_assert!(matches!(self.outcome, Outcome::Ongoing));
 
-        let mut actions = smallvec![Action::Fold, Action::Call];
+        let mut actions = ArrayVec::new();
+        actions.extend([Action::Fold, Action::Call]);
         if self.num_raises_this_street < MAX_RAISES_PER_STREET {
             let bet_in_sb = self.raise_amount() + self.raises_this_street_in_sb[!self.stm as usize]
                 - self.raises_this_street_in_sb[self.stm as usize];
@@ -533,7 +535,7 @@ mod tests {
             assert_eq!(board.raise_amount(), amount);
             assert_eq!(
                 board.get_actions(),
-                SmallVec::from_buf([Action::Fold, Action::Call, Action::Raise(amount)]),
+                ArrayVec::from([Action::Fold, Action::Call, Action::Raise(amount)]),
             );
         }
     }
@@ -625,10 +627,9 @@ mod tests {
                 assert_eq!(board.street, street);
                 assert_chips_conserved(&board);
             }
-            assert_eq!(
-                board.get_actions(),
-                SmallVec::from_buf([Action::Fold, Action::Call])
-            );
+            let mut actions = ArrayVec::new();
+            actions.extend([Action::Fold, Action::Call]);
+            assert_eq!(board.get_actions(), actions);
         }
     }
 

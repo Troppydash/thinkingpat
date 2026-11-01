@@ -17,9 +17,11 @@ use crate::{
 mod arena;
 mod bits;
 mod bot;
+mod dist;
 mod game;
 mod group;
 mod solver;
+mod ver;
 
 fn compute_equity_group(
     filename: &str,

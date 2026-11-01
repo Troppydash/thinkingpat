@@ -8,16 +8,26 @@ use crate::{
     group::group::Group,
 };
 
-pub fn choose(n: u64, k: u64) -> u64 {
+pub const fn choose(n: u64, mut k: u64) -> u64 {
     if k > n {
         return 0;
     }
-    let k = k.min(n - k);
+
+    if n - k < k {
+        k = n - k;
+    }
+
     let mut out = 1;
-    for i in 0..k {
+    let mut i = 0;
+    while i < k {
         out = out * (n - i) / (i + 1);
+        i += 1;
     }
     out
+}
+
+pub const fn choose_usize(n: usize, k: usize) -> usize {
+    choose(n as u64, k as u64) as usize
 }
 
 // Combinatorial number system for a combination
@@ -33,8 +43,39 @@ fn cns(mut mask: u16) -> usize {
     value
 }
 
+// decompose index into positions knowing the size upper and number of elements
+fn unrank_combination(mut index: usize, mut upper: usize, positions: &mut [usize]) {
+    for count in (1..=positions.len()).rev() {
+        let mut low = count - 1;
+        let mut high = upper;
+        while low + 1 < high {
+            let middle = low + (high - low) / 2;
+            if choose(middle as u64, count as u64) as usize <= index {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        positions[count - 1] = low;
+        index -= choose(low as u64, count as u64) as usize;
+        upper = low;
+    }
+    debug_assert_eq!(index, 0);
+}
+
+// uncns index assuming highest ranks knowing the count
+fn uncns(index: usize, ranks: usize, count: usize) -> u16 {
+    let mut positions = [0; Rank::COUNT];
+    unrank_combination(index, ranks, &mut positions[..count]);
+    positions[..count]
+        .iter()
+        .fold(0, |mask, &rank| mask | (1u16 << rank))
+}
+
 // Descending (hand count, community count) pairs, one per suit.
 type PatternKey = [[u8; 2]; Suit::COUNT];
+
+#[derive(Debug)]
 struct PatternData {
     // Mixed-radix stride at the start of each equal-count suit group.
     strides: [usize; Suit::COUNT],
@@ -48,11 +89,30 @@ fn index_suit(hand: u16, community: u16) -> usize {
     cns(hand) + choose(Rank::COUNT as u64, hand.count_ones() as u64) as usize * cns(compressed)
 }
 
+fn unindex_suit(index: usize, hand_count: usize, community_count: usize) -> (u16, u16) {
+    let hand_variants = choose(Rank::COUNT as u64, hand_count as u64) as usize;
+
+    let hand_ranks = uncns(index % hand_variants, Rank::COUNT, hand_count);
+    let compressed = uncns(
+        index / hand_variants,
+        Rank::COUNT - hand_count,
+        community_count,
+    );
+
+    // decompress
+    let available = ((1u64 << Rank::COUNT) - 1) & !(hand_ranks as u64);
+    let community_ranks = bits::pdep(compressed as u64, available) as u16;
+
+    (hand_ranks, community_ranks)
+}
+
+#[derive(Debug)]
 pub struct SuitIndex {
     hand_cards: usize,
     community_cards: usize,
     size: usize,
     patterns: FxHashMap<PatternKey, PatternData>,
+    pattern_ranges: Vec<(usize, PatternKey)>,
 }
 
 impl SuitIndex {
@@ -92,6 +152,7 @@ impl SuitIndex {
         }
 
         let mut patterns = FxHashMap::default();
+        let mut pattern_ranges = Vec::new();
         let mut offset = 0usize;
         iterate_pattern_keys(
             [hand_cards, community_cards],
@@ -116,6 +177,7 @@ impl SuitIndex {
                     count *= choose(ranks + suits - 1, suits) as usize;
                     start = end;
                 }
+                pattern_ranges.push((offset, key));
                 patterns.insert(key, PatternData { strides, offset });
                 offset += count;
             },
@@ -124,8 +186,55 @@ impl SuitIndex {
             hand_cards,
             community_cards,
             patterns,
+            pattern_ranges,
             size: offset,
         }
+    }
+
+    pub fn unmap(&self, index: usize) -> (CardSet, CardSet) {
+        assert!(index < self.size, "suit index out of bounds");
+        let pattern_index = self
+            .pattern_ranges
+            .partition_point(|&(offset, _)| offset <= index)
+            - 1;
+        let (offset, pattern) = self.pattern_ranges[pattern_index];
+        let data = &self.patterns[&pattern];
+        let index = index - offset;
+        let mut hand = CardSet::EMPTY;
+        let mut community = CardSet::EMPTY;
+
+        let mut start = 0;
+        while start < Suit::COUNT {
+            let mut end = start + 1;
+            while end < Suit::COUNT && pattern[end] == pattern[start] {
+                end += 1;
+            }
+
+            let [hand_count, community_count] = pattern[start].map(usize::from);
+            let hand_variants = choose(Rank::COUNT as u64, hand_count as u64) as usize;
+            let variants = hand_variants
+                * choose((Rank::COUNT - hand_count) as u64, community_count as u64) as usize;
+            let suits = end - start;
+            let radix = choose((variants + suits - 1) as u64, suits as u64) as usize;
+
+            let group_index = index / data.strides[start] % radix;
+
+            // Undo the strictly increasing positions value[j] + j used by map().
+            let mut positions = [0; Suit::COUNT];
+            unrank_combination(group_index, variants + suits - 1, &mut positions[..suits]);
+            for (position, &element) in positions[..suits].iter().enumerate() {
+                let value = element - position;
+                let (hand_ranks, community_ranks) =
+                    unindex_suit(value, hand_count, community_count);
+
+                // write suit
+                let suit_mask = (0x1111_1111_1111_1111 & CardSet::FULL.0) << (start + position);
+                hand.0 |= bits::pdep(hand_ranks as u64, suit_mask);
+                community.0 |= bits::pdep(community_ranks as u64, suit_mask);
+            }
+            start = end;
+        }
+        (hand, community)
     }
 }
 
@@ -241,6 +350,13 @@ mod tests {
                 seen.iter().all(Option::is_some),
                 "unused indices for {count} cards"
             );
+            for (id, expected) in seen.into_iter().enumerate() {
+                let (hand, community) = index.unmap(id);
+                assert_eq!(community, CardSet::EMPTY);
+                let mut canonical = Suit::ALL.map(|suit| hand.suit_ranks(suit));
+                canonical.sort_unstable();
+                assert_eq!(Some(canonical), expected, "unmap({id}), {count} cards");
+            }
         }
     }
 
@@ -380,7 +496,67 @@ mod tests {
                 seen.iter().all(Option::is_some),
                 "gaps for ({hand_count}, {community_count})"
             );
+            for (id, expected) in seen.into_iter().enumerate() {
+                let (hand, community) = index.unmap(id);
+                assert!(hand.is_disjoint(community));
+                let mut canonical =
+                    Suit::ALL.map(|suit| [hand.suit_ranks(suit), community.suit_ranks(suit)]);
+                canonical.sort_unstable();
+                assert_eq!(Some(canonical), expected, "unmap({id})");
+            }
         }
+    }
+
+    #[test]
+    fn unmap_round_trips_pattern_boundaries_and_sampled_indices() {
+        use rand::{RngExt, SeedableRng, rngs::StdRng};
+
+        let mut rng = StdRng::from_seed([42; 32]);
+        for (hand_count, community_count) in [
+            (0, 0),
+            (2, 0),
+            (2, 3),
+            (2, 4),
+            (2, 5),
+            (4, 4),
+            (0, 13),
+            (13, 0),
+        ] {
+            let index = SuitIndex::new(hand_count, community_count);
+            let check = |id| {
+                let (hand, community) = index.unmap(id);
+                assert_eq!(hand.len(), hand_count);
+                assert_eq!(community.len(), community_count);
+                assert!(hand.is_disjoint(community));
+                assert_eq!((hand | community).0 & !CardSet::FULL.0, 0);
+                assert_eq!(index.map(hand, community), id);
+                assert_eq!(index.unmap(id), (hand, community));
+            };
+            for (i, &(offset, _)) in index.pattern_ranges.iter().enumerate() {
+                check(offset);
+                let end = index
+                    .pattern_ranges
+                    .get(i + 1)
+                    .map_or(index.size(), |p| p.0);
+                check(end - 1);
+            }
+            for _ in 0..2000 {
+                check(rng.random_range(0..index.size()));
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "suit index out of bounds")]
+    fn unmap_rejects_index_at_size() {
+        let index = SuitIndex::new(2, 3);
+        index.unmap(index.size());
+    }
+
+    #[test]
+    #[should_panic(expected = "suit index out of bounds")]
+    fn unmap_rejects_large_index() {
+        SuitIndex::new(0, 0).unmap(usize::MAX);
     }
 
     #[cfg(debug_assertions)]

@@ -4,8 +4,14 @@ use std::{
     io::{self, BufReader, BufWriter, Read, Write},
 };
 
+use arrayvec::ArrayVec;
 use fxhash::FxHashMap;
-use rand::RngExt;
+use rand::{
+    Rng, RngExt,
+    distr::{Distribution, weighted::WeightedIndex},
+    rngs::{StdRng, ThreadRng},
+    seq::IndexedRandom,
+};
 use smallvec::SmallVec;
 
 use crate::{
@@ -17,7 +23,7 @@ use crate::{
     solver::cache::Cache,
 };
 
-pub const MAX_ACTION_LENGTH: usize = 4 * 4;
+pub const MAX_ACTION_LENGTH: usize = 4 * 5;
 pub const MAX_ACTIONS: usize = 3;
 type Actions = [f32; MAX_ACTIONS];
 type Policy = FxHashMap<Infoset, InfosetData>;
@@ -100,7 +106,7 @@ pub struct Solver {
 impl Solver {
     pub fn new(load: impl Fn(Street) -> Box<dyn Group>) -> Self {
         let street_groups = Street::ALL.map(load);
-        let cache = Cache::new(&street_groups[Street::Preflop as usize]);
+        let cache = Cache::new(&street_groups);
         Self {
             infosets: FxHashMap::default(),
             street_groups,
@@ -114,21 +120,27 @@ impl Solver {
         let cards = board.card_state_full();
         for player in Player::ALL {
             for street in Street::ALL {
-                if street == Street::Preflop {
-                    groups[player as usize][street as usize] =
-                        self.cache.hand_groups[&cards.hands[player as usize]];
+                let hand = cards.hands[player as usize];
+                let community = cards.community[..street.visible_community()]
+                    .iter()
+                    .copied()
+                    .collect();
+
+                let group = if street == Street::River {
+                    self.street_groups[street as usize].map(hand, community)
                 } else {
-                    let group = self.street_groups[street as usize].map(
-                        cards.hands[player as usize],
-                        cards.community[..street.visible_community()]
-                            .iter()
-                            .copied()
-                            .collect(),
-                    );
-                    groups[player as usize][street as usize] = group
+                    self.cache.lookup_group(hand, community, street)
+                };
+
+                let total_group = if street == Street::Preflop {
+                    group
+                } else {
+                    group
                         + groups[player as usize][street as usize - 1]
-                            * self.street_groups[street as usize].size();
-                }
+                            * self.street_groups[street as usize].size()
+                };
+
+                groups[player as usize][street as usize] = total_group;
             }
         }
 
@@ -188,7 +200,7 @@ impl Solver {
         &mut self,
         reach_prob: &[f64; Player::COUNT],
         board: &Board,
-        history: &mut Vec<Action>,
+        history: &mut ArrayVec<Action, MAX_ACTION_LENGTH>,
         board_group: &BoardGroups,
     ) -> f64 {
         // terminal
@@ -244,6 +256,76 @@ impl Solver {
                 + (opp_reach_prob * (counterfactual_value[i] - value)) as f32)
                 .max(0.0);
             data.strategy_sum[i] += (reach_prob[board.stm() as usize] * strategy[i] as f64) as f32;
+        }
+
+        return value;
+    }
+
+    fn mc_cfr(
+        &mut self,
+        responder: Player,
+        board: &Board,
+        history: &mut ArrayVec<Action, MAX_ACTION_LENGTH>,
+        board_group: &BoardGroups,
+        rng: &mut impl Rng,
+    ) -> f64 {
+        // terminal
+        if let Outcome::Winnings(winnings) = board.outcome() {
+            return winnings[responder as usize] as f64;
+        }
+
+        let infoset = Infoset::new(
+            board.street(),
+            board_group[board.stm() as usize][board.street() as usize],
+            &history,
+        );
+
+        let actions = board.get_actions();
+        let strategy = self.regret_matching(&infoset, actions.len());
+
+        let value: f64;
+
+        if board.stm() != responder {
+            let dist = WeightedIndex::new(&strategy).unwrap();
+            let sampled = dist.sample(rng);
+            let action = actions[sampled];
+
+            let mut new_board = board.clone();
+            new_board.play(action);
+
+            history.push(action);
+            value = self.mc_cfr(responder, &new_board, history, board_group, rng);
+            history.pop();
+
+            let data = self.infosets.get_mut(&infoset).unwrap();
+            for i in 0..actions.len() {
+                data.strategy_sum[i] += strategy[i] as f32;
+            }
+        } else {
+            let mut counterfactual_value = [0.0_f64; MAX_ACTIONS];
+            for (i, action) in actions.iter().enumerate() {
+                let mut new_board = board.clone();
+                new_board.play(*action);
+
+                history.push(*action);
+
+                counterfactual_value[i] =
+                    self.mc_cfr(responder, &new_board, history, board_group, rng);
+                history.pop();
+            }
+
+            value = counterfactual_value
+                .iter()
+                .enumerate()
+                .map(|(i, v)| strategy[i] as f64 * v)
+                .sum();
+
+            // regret sum update
+            let data = self.infosets.get_mut(&infoset).unwrap();
+            for i in 0..actions.len() {
+                data.regret_sum[i] =
+                    (data.regret_sum[i] + (counterfactual_value[i] - value) as f32);
+            }
         }
 
         return value;
@@ -385,10 +467,13 @@ impl Solver {
         if iters == 0 {
             return;
         }
+
         std::fs::create_dir_all(filename).unwrap();
-        let mut history = vec![];
+        let mut history: ArrayVec<Action, MAX_ACTION_LENGTH> = ArrayVec::new();
         let states: usize = self.street_groups.iter().map(|s| s.size()).product();
         println!("info cfr states at least {states}");
+
+        let mut rng = rand::rng();
 
         let target = self.iters + iters;
         while self.iters < target {
@@ -396,10 +481,13 @@ impl Solver {
                 println!("info cfr iter {}", self.iters);
             }
             let board = Board::new();
-            let reach_prob = [1.0; Player::COUNT];
-
             let board_groups = self.make_board_group(&board);
+            let reach_prob = [1.0; Player::COUNT];
             self.cfr(&reach_prob, &board, &mut history, &board_groups);
+            // for player in Player::ALL {
+            //     self.mc_cfr(player, &board, &mut history, &board_groups, &mut rng);
+            // }
+
             self.iters += 1;
 
             if self.iters % 200000 == 0 || self.iters == target {

@@ -3,6 +3,7 @@ use std::{
     ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Not, Sub, SubAssign},
 };
 
+use arrayvec::ArrayVec;
 use rand::{Rng, RngExt, rngs::ThreadRng, seq::index};
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +108,10 @@ impl Card {
 
     pub const fn rank(&self) -> Rank {
         Rank::ALL[(self.0 >> 2) as usize]
+    }
+
+    pub const fn index(&self) -> usize {
+        self.0 as usize
     }
 
     pub const COUNT: usize = Suit::COUNT * Rank::COUNT;
@@ -223,6 +228,18 @@ impl CardSet {
         let removed = self.0 & bit != 0;
         self.0 &= !bit;
         removed
+    }
+
+    /// Always returns it from weaker to stronger
+    #[inline]
+    pub fn take<const K: usize>(&self) -> ArrayVec<Card, K> {
+        let mut out = ArrayVec::new();
+
+        for card in self.iter() {
+            out.push(card);
+        }
+
+        out
     }
 
     /// Gather this suit's interleaved bits into a 13-bit rank mask.

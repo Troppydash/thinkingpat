@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     bits,
     game::{
-        board::{Player, Street},
-        card::CardSet,
+        board::Street,
+        card::{Card, CardSet},
         showdown,
     },
     group::{
@@ -37,8 +37,8 @@ pub fn to_pdf(cdf: &[f32]) -> Vec<f32> {
     delta
 }
 
-const SIMULATE_HOLE_ITERS: usize = 100;
-const SIMULATE_COMMUNITY_ITERS: usize = 100;
+const SIMULATE_HOLE_ITERS: usize = 50;
+const SIMULATE_COMMUNITY_ITERS: usize = 50;
 const KMEANS_ITERS: usize = 200;
 
 pub fn simulate_equity(
@@ -60,6 +60,33 @@ pub fn simulate_equity(
     // note that we use vecs here because slowdown should be in the simulation step
     let mut equity_bins = vec![0.0; bins];
     let step = 1.0 / bins as f32;
+    let k = 5 - community.len();
+
+    let cache_hero = community.len() >= 3;
+    let mut hero_ranks = [None; Card::COUNT * (Card::COUNT - 1) / 2];
+    let mut showdown_equity = |opp_hand: CardSet, full_community: CardSet| {
+        let hero_rank = if cache_hero {
+            let extra = (full_community - community).0;
+            // Dense index for an empty runout, one card, or an unordered pair.
+            let index = match k {
+                0 => 0,
+                1 => extra.trailing_zeros() as usize,
+                2 => {
+                    let high = extra.ilog2() as usize;
+                    high * (high - 1) / 2 + extra.trailing_zeros() as usize
+                }
+                _ => unreachable!(),
+            };
+            *hero_ranks[index].get_or_insert_with(|| showdown::evaluate(hand | full_community))
+        } else {
+            showdown::evaluate(hand | full_community)
+        };
+        match hero_rank.cmp(&showdown::evaluate(opp_hand | full_community)) {
+            std::cmp::Ordering::Greater => 1.0,
+            std::cmp::Ordering::Less => 0.0,
+            std::cmp::Ordering::Equal => 0.5,
+        }
+    };
 
     // hole iteration
     for _ in 0..hole_iters {
@@ -67,14 +94,9 @@ pub fn simulate_equity(
 
         // iterate over all community
         let remain = !(hand | opp_hand | community);
-        let k = 5 - community.len();
 
         let equity = if k == 0 {
-            match showdown::winner(hand, opp_hand, community) {
-                Some(Player::BB) => 1.0,
-                Some(Player::SB) => 0.0,
-                None => 0.5,
-            }
+            showdown_equity(opp_hand, community)
         } else {
             let mut equity = 0.0;
             let mut count = 0;
@@ -87,20 +109,12 @@ pub fn simulate_equity(
                 for _ in 0..community_iters {
                     let extra_community =
                         CardSet::sample_remain(hand | opp_hand | community, &mut rng, k);
-                    equity += match showdown::winner(hand, opp_hand, community | extra_community) {
-                        Some(Player::BB) => 1.0,
-                        Some(Player::SB) => 0.0,
-                        None => 0.5,
-                    };
+                    equity += showdown_equity(opp_hand, community | extra_community);
                     count += 1;
                 }
             } else {
                 CardSet::iterate_community(remain, k, |extra_community| {
-                    equity += match showdown::winner(hand, opp_hand, community | extra_community) {
-                        Some(Player::BB) => 1.0,
-                        Some(Player::SB) => 0.0,
-                        None => 0.5,
-                    };
+                    equity += showdown_equity(opp_hand, community | extra_community);
                     count += 1;
                 });
             }

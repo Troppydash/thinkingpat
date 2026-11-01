@@ -45,7 +45,7 @@ fn kickers(mut value: [u8; 6], mut mask: u16, slots: std::ops::Range<usize>) -> 
 }
 
 // [category, high card, kickers...]
-fn evaluate(cards: CardSet) -> [u8; 6] {
+pub fn evaluate(cards: CardSet) -> [u8; 6] {
     let suits = Suit::ALL.map(|suit| cards.suit_ranks(suit));
     let ranks = suits.into_iter().fold(0, |ranks, suit| ranks | suit);
 
