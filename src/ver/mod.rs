@@ -1,4 +1,7 @@
-use std::fs;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[macro_export]
 macro_rules! versions {
@@ -26,8 +29,8 @@ pub trait Versioned<V: ToString> {
     fn from_bytes(version: &V, path: &str, bytes: &[u8]) -> Self;
 }
 
-fn get_path<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> String {
-    format!("{}/{}", path, version.to_string())
+fn get_path<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> PathBuf {
+    format!("{}/{}.bin", path, version.to_string()).into()
 }
 
 pub fn try_load<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> T {
@@ -37,6 +40,10 @@ pub fn try_load<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> T {
     }
 
     let t = T::build(&version, &path);
+    if let Some(parent) = direct_path.parent() {
+        println!("info creating {:?}", parent);
+        fs::create_dir_all(parent).unwrap();
+    }
     fs::write(&direct_path, t.to_bytes()).unwrap();
     t
 }

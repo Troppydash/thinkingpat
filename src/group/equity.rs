@@ -59,12 +59,12 @@ fn kmeans(
     let mut points: Vec<EquityVector> = vec![];
     points.reserve_exact(samples);
     for i in 0..samples {
-        if i % 100 == 0 {
+        if i % 2000 == 0 {
             println!("debug samples {}", i);
         }
 
         let (hand, community) = CardSet::sample2(rng, 2, street.visible_community());
-        let equity = get_equity(hand, community);
+        let equity = to_cdf(&get_equity(hand, community));
         points.push(equity);
     }
 
@@ -77,8 +77,8 @@ fn kmeans(
 
     // k means iteration
     for iter in 0..KMEANS_ITERS {
-        if iter % 10 == 0 {
-            println!("debug kmeans iter {}", iter);
+        if iter % 50 == 0 {
+            println!("info kmeans iter {}", iter);
         }
 
         db.reset();
@@ -204,7 +204,7 @@ impl Versioned<PreflopGroupVersions> for PreflopGroup {
 
 impl Group for PreflopGroup {
     fn map(&self, hand: CardSet, _community: CardSet) -> usize {
-        let equity = self.equity.equity(hand, &self.index).to_vec();
+        let equity = to_cdf(&self.equity.equity(hand, &self.index));
         let (i, _distance) = self.db.query(&equity);
         i as usize
     }
@@ -289,7 +289,7 @@ impl Versioned<FlopGroupVersions> for FlopGroup {
 
 impl Group for FlopGroup {
     fn map(&self, hand: CardSet, community: CardSet) -> usize {
-        let equity = self.equity.equity(hand, community, &self.index).to_vec();
+        let equity = to_cdf(&self.equity.equity(hand, community, &self.index));
         let (i, _distance) = self.db.query(&equity);
         i as usize
     }
@@ -374,7 +374,7 @@ impl Versioned<TurnGroupVersions> for TurnGroup {
 
 impl Group for TurnGroup {
     fn map(&self, hand: CardSet, community: CardSet) -> usize {
-        let equity = self.equity.equity(hand, community, &self.index).to_vec();
+        let equity = to_cdf(&self.equity.equity(hand, community, &self.index));
         let (i, _distance) = self.db.query(&equity);
         i as usize
     }
@@ -405,12 +405,12 @@ impl Versioned<RiverGroupVersions> for RiverGroup {
                 let rng = &mut rand::rng();
                 let equity: texture::River = try_load(&texture::TextureRiverVersions::V1, path);
                 let index = SuitIndex::new(2, 5);
-                let centroids = kmeans(10000, 5, 1, Street::Turn, rng, |hand, community| {
+                let centroids = kmeans(10000, 10, 1, Street::River, rng, |hand, community| {
                     vec![equity.equity(hand, community, &index)]
                 });
 
                 let mut db = Box::new(U::new(1));
-                db.reserve(5);
+                db.reserve(10);
                 for (i, centroid) in centroids.iter().enumerate() {
                     db.store(i as u64, centroid);
                 }
@@ -436,7 +436,7 @@ impl Versioned<RiverGroupVersions> for RiverGroup {
         let data: EquityData = postcard::from_bytes(bytes).unwrap();
 
         let mut db = Box::new(U::new(1));
-        db.reserve(5);
+        db.reserve(10);
         for (i, centroid) in data.centroids.iter().enumerate() {
             db.store(i as u64, centroid);
         }
