@@ -1,7 +1,7 @@
 use crate::{
     bot::bot::Bot,
+    dist::sample::simulate_equity,
     game::board::{Action, Board},
-    group::equity::{simulate_equity, to_pdf},
 };
 
 pub struct Equity;
@@ -15,7 +15,7 @@ impl Bot for Equity {
             .cloned()
             .collect();
         let bins = 1000;
-        let equity = to_pdf(&simulate_equity(hand, community, bins, 100, Some(100)));
+        let equity = &simulate_equity(hand, community, bins, 100, Some(100));
         let equity: f32 = equity
             .iter()
             .enumerate()

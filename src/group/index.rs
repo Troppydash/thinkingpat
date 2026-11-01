@@ -285,6 +285,10 @@ impl Group for SuitIndex {
     fn size(&self) -> usize {
         self.size
     }
+    
+    fn repr(&self, _i: usize) -> Vec<f32> {
+        unimplemented!()
+    }
 }
 
 #[cfg(test)]

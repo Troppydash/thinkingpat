@@ -23,7 +23,7 @@ macro_rules! versions {
 pub trait Versioned<V: ToString> {
     fn build(version: &V, path: &str) -> Self;
     fn to_bytes(&self) -> Vec<u8>;
-    fn from_bytes(bytes: &[u8]) -> Self;
+    fn from_bytes(version: &V, path: &str, bytes: &[u8]) -> Self;
 }
 
 fn get_path<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> String {
@@ -31,14 +31,18 @@ fn get_path<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> String {
 }
 
 pub fn try_load<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> T {
-    let path = get_path::<V, T>(&version, path);
-    if let Ok(bytes) = fs::read(&path) {
-        return T::from_bytes(&bytes);
+    let direct_path = get_path::<V, T>(&version, path);
+    if let Ok(bytes) = fs::read(&direct_path) {
+        return T::from_bytes(version, path, &bytes);
     }
 
     let t = T::build(&version, &path);
-    fs::write(&path, t.to_bytes()).unwrap();
+    fs::write(&direct_path, t.to_bytes()).unwrap();
     t
+}
+
+pub fn load<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> T {
+    T::build(&version, &path)
 }
 
 #[allow(dead_code)]
@@ -55,7 +59,7 @@ mod test {
             todo!()
         }
 
-        fn from_bytes(_bytes: &[u8]) -> Self {
+        fn from_bytes(_version: &TestVersion, path: &str, _bytes: &[u8]) -> Self {
             todo!()
         }
 

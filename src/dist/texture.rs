@@ -127,7 +127,7 @@ impl Versioned<TextureRiverVersions> for River {
         postcard::to_allocvec(self).unwrap()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Self {
+    fn from_bytes(_version: &TextureRiverVersions, _path: &str, bytes: &[u8]) -> Self {
         postcard::from_bytes(bytes).unwrap()
     }
 }
@@ -192,7 +192,7 @@ impl Versioned<TextureTurnVersions> for Turn {
         postcard::to_allocvec(self).unwrap()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Self {
+    fn from_bytes(_version: &TextureTurnVersions, _path: &str, bytes: &[u8]) -> Self {
         postcard::from_bytes(bytes).unwrap()
     }
 }
@@ -257,7 +257,7 @@ impl Versioned<TextureFlopVersions> for Flop {
         postcard::to_allocvec(self).unwrap()
     }
 
-    fn from_bytes(bytes: &[u8]) -> Self {
+    fn from_bytes(_version: &TextureFlopVersions, _path: &str, bytes: &[u8]) -> Self {
         postcard::from_bytes(bytes).unwrap()
     }
 }

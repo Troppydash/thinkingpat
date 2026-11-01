@@ -9,8 +9,6 @@ use fxhash::FxHashMap;
 use rand::{
     Rng, RngExt,
     distr::{Distribution, weighted::WeightedIndex},
-    rngs::{StdRng, ThreadRng},
-    seq::IndexedRandom,
 };
 use smallvec::SmallVec;
 
@@ -19,8 +17,14 @@ use crate::{
         board::{Action, Board, CardState, Outcome, Player, Street},
         card::CardSet,
     },
-    group::group::Group,
-    solver::cache::Cache,
+    group::{
+        equity::{
+            FlopGroup, FlopGroupVersions, PreflopGroup, PreflopGroupVersions, RiverGroup,
+            RiverGroupVersions, TurnGroup, TurnGroupVersions,
+        },
+        group::Group,
+    },
+    ver::try_load,
 };
 
 pub const MAX_ACTION_LENGTH: usize = 4 * 5;
@@ -96,22 +100,42 @@ fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
     Ok(u64::from_le_bytes(bytes))
 }
 
+// TODO: make this a parameter instead
+pub fn create_groups(path: &str) -> [Box<dyn Group>; Street::COUNT] {
+    Street::ALL.map(|street| -> Box<dyn Group> {
+        match street {
+            Street::Preflop => Box::new(try_load::<PreflopGroupVersions, PreflopGroup>(
+                &PreflopGroupVersions::V1,
+                path,
+            )),
+            Street::Flop => Box::new(try_load::<FlopGroupVersions, FlopGroup>(
+                &FlopGroupVersions::V1,
+                path,
+            )),
+            Street::Turn => Box::new(try_load::<TurnGroupVersions, TurnGroup>(
+                &TurnGroupVersions::V1,
+                path,
+            )),
+            Street::River => Box::new(try_load::<RiverGroupVersions, RiverGroup>(
+                &RiverGroupVersions::V1,
+                path,
+            )),
+        }
+    })
+}
+
 pub struct Solver {
     infosets: Policy,
     street_groups: [Box<dyn Group>; Street::COUNT],
     iters: usize,
-    cache: Cache,
 }
 
 impl Solver {
-    pub fn new(load: impl Fn(Street) -> Box<dyn Group>) -> Self {
-        let street_groups = Street::ALL.map(load);
-        let cache = Cache::new(&street_groups);
+    pub fn new(path: &str) -> Self {
         Self {
             infosets: FxHashMap::default(),
-            street_groups,
+            street_groups: create_groups(path),
             iters: 0,
-            cache,
         }
     }
 
@@ -126,11 +150,7 @@ impl Solver {
                     .copied()
                     .collect();
 
-                let group = if street == Street::River {
-                    self.street_groups[street as usize].map(hand, community)
-                } else {
-                    self.cache.lookup_group(hand, community, street)
-                };
+                let group = self.street_groups[street as usize].map(hand, community);
 
                 let total_group = if street == Street::Preflop {
                     group
@@ -526,10 +546,10 @@ impl Solver {
         writer.flush().unwrap()
     }
 
-    pub fn load(filename: &str, load: impl Fn(Street) -> Box<dyn Group>) -> Self {
+    pub fn load(filename: &str, path: &str) -> Self {
         let mut reader =
             BufReader::with_capacity(CHECKPOINT_BUFFER_SIZE, File::open(filename).unwrap());
-        let mut solver = Self::new(load);
+        let mut solver = Self::new(path);
         let count = read_u64(&mut reader).unwrap() as usize;
         solver.infosets.try_reserve(count).unwrap();
 

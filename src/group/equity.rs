@@ -1,9 +1,8 @@
-use fxhash::FxHashMap;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    bits,
+    dist::{sample, texture},
     game::{
         board::Street,
         card::{Card, CardSet},
@@ -11,9 +10,11 @@ use crate::{
     },
     group::{
         group::Group,
-        index::choose,
+        index::{SuitIndex, choose},
         vectordb::{EquityVector, U, Vectordb},
     },
+    ver::{Versioned, try_load},
+    versions,
 };
 
 pub fn to_cdf(pdf: &[f32]) -> Vec<f32> {
@@ -37,192 +38,47 @@ pub fn to_pdf(cdf: &[f32]) -> Vec<f32> {
     delta
 }
 
-const SIMULATE_HOLE_ITERS: usize = 50;
-const SIMULATE_COMMUNITY_ITERS: usize = 50;
 const KMEANS_ITERS: usize = 200;
 
-pub fn simulate_equity(
-    hand: CardSet,
-    community: CardSet,
+/// hand equity distribution k means sample indexing
+fn kmeans(
+    samples: usize,
+    num_centroids: usize,
     bins: usize,
-    hole_iters: usize,
-    community_iters: Option<usize>,
-) -> Vec<f32> {
-    // we want a deterministic rng
-    let mut seed_bytes = [0u8; 32];
-    seed_bytes[..8].copy_from_slice(&hand.0.to_le_bytes());
-    seed_bytes[8..16].copy_from_slice(&community.0.to_le_bytes());
-    let mut rng = StdRng::from_seed(seed_bytes);
+    street: Street,
+    rng: &mut impl Rng,
+    get_equity: impl Fn(CardSet, CardSet) -> Vec<f32>,
+) -> Vec<EquityVector> {
+    println!(
+        "info equity {} estimated memory {} MB",
+        street.to_string(),
+        bins * size_of::<f32>() * num_centroids / 1024 / 1024
+    );
 
-    // iterate all possible remaining community
-    // rough counts: river -> 1, turn -> 44, flop -> 990
-
-    // note that we use vecs here because slowdown should be in the simulation step
-    let mut equity_bins = vec![0.0; bins];
-    let step = 1.0 / bins as f32;
-    let k = 5 - community.len();
-
-    let cache_hero = community.len() >= 3;
-    let mut hero_ranks = [None; Card::COUNT * (Card::COUNT - 1) / 2];
-    let mut showdown_equity = |opp_hand: CardSet, full_community: CardSet| {
-        let hero_rank = if cache_hero {
-            let extra = (full_community - community).0;
-            // Dense index for an empty runout, one card, or an unordered pair.
-            let index = match k {
-                0 => 0,
-                1 => extra.trailing_zeros() as usize,
-                2 => {
-                    let high = extra.ilog2() as usize;
-                    high * (high - 1) / 2 + extra.trailing_zeros() as usize
-                }
-                _ => unreachable!(),
-            };
-            *hero_ranks[index].get_or_insert_with(|| showdown::evaluate(hand | full_community))
-        } else {
-            showdown::evaluate(hand | full_community)
-        };
-        match hero_rank.cmp(&showdown::evaluate(opp_hand | full_community)) {
-            std::cmp::Ordering::Greater => 1.0,
-            std::cmp::Ordering::Less => 0.0,
-            std::cmp::Ordering::Equal => 0.5,
+    // sample points
+    let mut points: Vec<EquityVector> = vec![];
+    points.reserve_exact(samples);
+    for i in 0..samples {
+        if i % 100 == 0 {
+            println!("debug samples {}", i);
         }
-    };
 
-    // hole iteration
-    for _ in 0..hole_iters {
-        let opp_hand = CardSet::sample_remain(hand | community, &mut rng, 2);
-
-        // iterate over all community
-        let remain = !(hand | opp_hand | community);
-
-        let equity = if k == 0 {
-            showdown_equity(opp_hand, community)
-        } else {
-            let mut equity = 0.0;
-            let mut count = 0;
-
-            let full = choose(remain.len() as u64, k as u64) as usize;
-            if let Some(community_iters) = community_iters
-                && community_iters < full
-            {
-                // sample community instead
-                for _ in 0..community_iters {
-                    let extra_community =
-                        CardSet::sample_remain(hand | opp_hand | community, &mut rng, k);
-                    equity += showdown_equity(opp_hand, community | extra_community);
-                    count += 1;
-                }
-            } else {
-                CardSet::iterate_community(remain, k, |extra_community| {
-                    equity += showdown_equity(opp_hand, community | extra_community);
-                    count += 1;
-                });
-            }
-
-            equity / count as f32
-        };
-
-        let bin = ((equity / step).floor() as usize).min(bins - 1);
-        equity_bins[bin] += 1.0 / hole_iters as f32;
+        let (hand, community) = CardSet::sample2(rng, 2, street.visible_community());
+        let equity = get_equity(hand, community);
+        points.push(equity);
     }
 
-    to_cdf(&equity_bins)
-}
+    let mut centroids: Vec<EquityVector> = rand::seq::index::sample(rng, samples, num_centroids)
+        .into_iter()
+        .map(|i| points[i].clone())
+        .collect();
 
-/// hand equity distribution k means sample indexing
-pub struct Equity {
-    db: Box<dyn Vectordb>,
-    // Technically this duplicates data, use an option if not needed
-    centroids: Vec<EquityVector>,
-    street: Street,
-    bins: usize,
-}
+    let mut db = U::new(bins);
 
-impl Equity {
-    pub fn compute(
-        samples: usize,
-        num_centroids: usize,
-        bins: usize,
-        street: Street,
-        rng: &mut impl Rng,
-    ) -> Self {
-        println!(
-            "info equity estimated memory {} MB",
-            bins * size_of::<f32>() * num_centroids / 1024 / 1024
-        );
-
-        // sample points
-        let mut points: Vec<EquityVector> = vec![];
-        points.reserve_exact(samples);
-        for i in 0..samples {
-            if i % 100 == 0 {
-                println!("debug samples {}", i);
-            }
-
-            let (hand, community) = CardSet::sample2(rng, 2, street.visible_community());
-            let equity = simulate_equity(
-                hand,
-                community,
-                bins,
-                SIMULATE_HOLE_ITERS,
-                Some(SIMULATE_COMMUNITY_ITERS),
-            );
-            points.push(equity);
-        }
-
-        let mut centroids: Vec<EquityVector> =
-            rand::seq::index::sample(rng, samples, num_centroids)
-                .into_iter()
-                .map(|i| points[i].clone())
-                .collect();
-
-        let mut db = U::new(bins);
-
-        // k means iteration
-        for iter in 0..KMEANS_ITERS {
-            if iter % 10 == 0 {
-                println!("debug kmeans iter {}", iter);
-            }
-
-            db.reset();
-            db.reserve(num_centroids);
-            for (i, centroid) in centroids.iter().enumerate() {
-                db.store(i as u64, centroid);
-            }
-
-            // find closest centroid per point
-            let mut new_centroids: Vec<Vec<usize>> = vec![vec![]; num_centroids];
-            for (i, point) in points.iter().enumerate() {
-                let (centroid, _distance) = db.query(&point);
-                new_centroids[centroid as usize].push(i);
-            }
-
-            // each centroid = average of points
-            for (centroid, close_points) in new_centroids.iter().enumerate() {
-                if close_points.is_empty() {
-                    // this can be bad
-                    continue;
-                }
-
-                let centroid = &mut centroids[centroid];
-                centroid.fill(0.0);
-                for p in close_points {
-                    for k in 0..bins {
-                        centroid[k] += points[*p][k] / close_points.len() as f32;
-                    }
-                }
-            }
-
-            if iter % 10 == 0 {
-                // within-cluster-sum-of-squares
-                let mut cost = 0.0;
-                for sample in points.iter() {
-                    let (_centroid, distance) = db.query(&sample);
-                    cost += distance * distance;
-                }
-
-                println!("info within_cluster_sum_of_squares {cost}");
-            }
+    // k means iteration
+    for iter in 0..KMEANS_ITERS {
+        if iter % 10 == 0 {
+            println!("debug kmeans iter {}", iter);
         }
 
         db.reset();
@@ -231,175 +87,384 @@ impl Equity {
             db.store(i as u64, centroid);
         }
 
-        Self {
-            db: Box::new(db),
-            centroids,
-            street,
-            bins,
+        // find closest centroid per point
+        let mut new_centroids: Vec<Vec<usize>> = vec![vec![]; num_centroids];
+        for (i, point) in points.iter().enumerate() {
+            let (centroid, _distance) = db.query(&point);
+            new_centroids[centroid as usize].push(i);
+        }
+
+        // each centroid = average of points
+        for (centroid, close_points) in new_centroids.iter().enumerate() {
+            if close_points.is_empty() {
+                // this can be bad
+                continue;
+            }
+
+            let centroid = &mut centroids[centroid];
+            centroid.fill(0.0);
+            for p in close_points {
+                for k in 0..bins {
+                    centroid[k] += points[*p][k] / close_points.len() as f32;
+                }
+            }
+        }
+
+        if iter % 10 == 0 {
+            // within-cluster-sum-of-squares
+            let mut cost = 0.0;
+            for sample in points.iter() {
+                let (_centroid, distance) = db.query(&sample);
+                cost += distance * distance;
+            }
+
+            println!(
+                "info within_cluster_sum_of_squares {}",
+                cost / centroids.len() as f32
+            );
         }
     }
 
-    pub fn save(&self, filename: &str) {
-        let data = EquityData {
-            centroids: self.centroids.clone(),
-            bins: self.bins,
-            street: self.street,
-        };
-        data.save(filename);
+    centroids
+}
+
+#[derive(Serialize, Deserialize)]
+struct EquityData {
+    centroids: Vec<EquityVector>,
+}
+
+pub struct PreflopGroup {
+    db: Box<dyn Vectordb>,
+    centroids: Vec<EquityVector>,
+    equity: sample::Preflop,
+    index: SuitIndex,
+}
+
+versions!(PreflopGroupVersions, V1);
+
+impl Versioned<PreflopGroupVersions> for PreflopGroup {
+    fn build(version: &PreflopGroupVersions, path: &str) -> Self {
+        match version {
+            PreflopGroupVersions::V1 => {
+                let rng = &mut rand::rng();
+                let equity: sample::Preflop = try_load(&sample::SamplePreflopVersions::V1, path);
+                let index = SuitIndex::new(2, 0);
+                let centroids = kmeans(
+                    10000,
+                    20,
+                    sample::BINS,
+                    Street::Preflop,
+                    rng,
+                    |hand, _community| equity.equity(hand, &index).to_vec(),
+                );
+
+                let mut db = Box::new(U::new(sample::BINS));
+                db.reserve(20);
+                for (i, centroid) in centroids.iter().enumerate() {
+                    db.store(i as u64, centroid);
+                }
+
+                Self {
+                    db,
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
+        }
     }
 
-    pub fn load(filename: &str) -> Self {
-        let data = EquityData::load(filename);
+    fn to_bytes(&self) -> Vec<u8> {
+        let data = EquityData {
+            centroids: self.centroids.clone(),
+        };
+        postcard::to_allocvec(&data).unwrap()
+    }
 
-        let mut db = Box::new(U::new(data.bins));
-        db.reserve(data.centroids.len());
+    fn from_bytes(_version: &PreflopGroupVersions, path: &str, bytes: &[u8]) -> Self {
+        let data: EquityData = postcard::from_bytes(bytes).unwrap();
+
+        let mut db = Box::new(U::new(sample::BINS));
+        db.reserve(20);
         for (i, centroid) in data.centroids.iter().enumerate() {
             db.store(i as u64, centroid);
         }
 
+        let equity: sample::Preflop = try_load(&sample::SamplePreflopVersions::V1, path);
+        let index = SuitIndex::new(2, 0);
+
         Self {
             db,
             centroids: data.centroids,
-            bins: data.bins,
-            street: data.street,
-        }
-    }
-
-    /// Sample hands/community and group
-    pub fn visualize(&self, rng: &mut impl Rng, samples: usize) {
-        let mut table = vec![vec![]; self.size()];
-        for _ in 0..samples {
-            let (hand, community) = CardSet::sample2(rng, 2, self.street.visible_community());
-            let group = self.map(hand, community);
-            table[group].push((hand, community));
-        }
-
-        for (i, entries) in table.iter().enumerate() {
-            println!("info group {} entries {}", i, entries.len());
-        }
-
-        for (i, entries) in table.iter().enumerate() {
-            println!("info group {}", i);
-            println!("info {:?}", to_pdf(&self.centroids[i]));
-            for (hand, community) in entries {
-                println!("info {} | {}", hand.to_string(), community.to_string());
-            }
+            equity,
+            index,
         }
     }
 }
 
-impl Group for Equity {
-    fn map(&self, hand: CardSet, community: CardSet) -> usize {
-        let equity = simulate_equity(
-            hand,
-            community,
-            self.bins,
-            SIMULATE_HOLE_ITERS,
-            Some(SIMULATE_COMMUNITY_ITERS),
-        );
+impl Group for PreflopGroup {
+    fn map(&self, hand: CardSet, _community: CardSet) -> usize {
+        let equity = self.equity.equity(hand, &self.index).to_vec();
         let (i, _distance) = self.db.query(&equity);
-
         i as usize
     }
 
     fn size(&self) -> usize {
         self.centroids.len()
     }
+
+    fn repr(&self, i: usize) -> Vec<f32> {
+        self.centroids[i].clone()
+    }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct EquityData {
+pub struct FlopGroup {
+    db: Box<dyn Vectordb>,
     centroids: Vec<EquityVector>,
-    street: Street,
-    bins: usize,
+    equity: texture::Flop,
+    index: SuitIndex,
 }
 
-impl EquityData {
-    fn save(&self, filename: &str) {
-        let bytes: Vec<u8> = postcard::to_allocvec(self).unwrap();
-        std::fs::write(filename, bytes).unwrap();
-    }
+versions!(FlopGroupVersions, V1);
 
-    fn load(filename: &str) -> Self {
-        let bytes = std::fs::read(filename).unwrap();
-        postcard::from_bytes(&bytes).unwrap()
-    }
-}
+impl Versioned<FlopGroupVersions> for FlopGroup {
+    fn build(version: &FlopGroupVersions, path: &str) -> Self {
+        match version {
+            FlopGroupVersions::V1 => {
+                let rng = &mut rand::rng();
+                let equity: texture::Flop = try_load(&texture::TextureFlopVersions::V1, path);
+                let index = SuitIndex::new(2, 3);
+                let centroids = kmeans(
+                    10000,
+                    20,
+                    texture::BINS,
+                    Street::Flop,
+                    rng,
+                    |hand, community| equity.equity(hand, community, &index).to_vec(),
+                );
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn community_combinations_match_all_subsets() {
-        // Exhaust all eight-card availability patterns, including gaps across
-        // byte boundaries and high card positions.
-        for pattern in 0u64..256 {
-            let remain = (0..8).fold(0u64, |bits, i| bits | (((pattern >> i) & 1) << (i * 7)));
-            for k in 0..=9 {
-                let mut expected = Vec::new();
-                let mut subset = remain;
-                loop {
-                    if subset.count_ones() as usize == k {
-                        expected.push(subset);
-                    }
-                    if subset == 0 {
-                        break;
-                    }
-                    subset = (subset - 1) & remain;
+                let mut db = Box::new(U::new(texture::BINS));
+                db.reserve(20);
+                for (i, centroid) in centroids.iter().enumerate() {
+                    db.store(i as u64, centroid);
                 }
-                expected.reverse();
 
-                let mut actual = Vec::new();
-                CardSet::iterate_community(CardSet(remain), k, |cards| actual.push(cards.0));
-                assert_eq!(actual, expected, "remain={remain:#x}, k={k}");
+                Self {
+                    db,
+                    centroids,
+                    equity,
+                    index,
+                }
             }
         }
     }
 
-    #[test]
-    fn full_deck_pairs_and_boundary_sizes() {
-        let mut count = 0;
-        CardSet::iterate_community(CardSet::FULL, 2, |cards| {
-            assert_eq!(cards.len(), 2);
-            assert_eq!(cards.0 & !CardSet::FULL.0, 0);
-            count += 1;
-        });
-        assert_eq!(count, 52 * 51 / 2);
+    fn to_bytes(&self) -> Vec<u8> {
+        let data = EquityData {
+            centroids: self.centroids.clone(),
+        };
+        postcard::to_allocvec(&data).unwrap()
+    }
 
-        for k in [0, 52, 53] {
-            let mut actual = Vec::new();
-            CardSet::iterate_community(CardSet::FULL, k, |cards| actual.push(cards));
-            let expected = match k {
-                0 => vec![CardSet::EMPTY],
-                52 => vec![CardSet::FULL],
-                _ => vec![],
-            };
-            assert_eq!(actual, expected);
+    fn from_bytes(_version: &FlopGroupVersions, path: &str, bytes: &[u8]) -> Self {
+        let data: EquityData = postcard::from_bytes(bytes).unwrap();
+
+        let mut db = Box::new(U::new(texture::BINS));
+        db.reserve(20);
+        for (i, centroid) in data.centroids.iter().enumerate() {
+            db.store(i as u64, centroid);
+        }
+
+        let equity: texture::Flop = try_load(&texture::TextureFlopVersions::V1, path);
+        let index = SuitIndex::new(2, 3);
+
+        Self {
+            db,
+            centroids: data.centroids,
+            equity,
+            index,
+        }
+    }
+}
+
+impl Group for FlopGroup {
+    fn map(&self, hand: CardSet, community: CardSet) -> usize {
+        let equity = self.equity.equity(hand, community, &self.index).to_vec();
+        let (i, _distance) = self.db.query(&equity);
+        i as usize
+    }
+
+    fn size(&self) -> usize {
+        self.centroids.len()
+    }
+
+    fn repr(&self, i: usize) -> Vec<f32> {
+        self.centroids[i].clone()
+    }
+}
+
+pub struct TurnGroup {
+    db: Box<dyn Vectordb>,
+    centroids: Vec<EquityVector>,
+    equity: texture::Turn,
+    index: SuitIndex,
+}
+
+versions!(TurnGroupVersions, V1);
+
+impl Versioned<TurnGroupVersions> for TurnGroup {
+    fn build(version: &TurnGroupVersions, path: &str) -> Self {
+        match version {
+            TurnGroupVersions::V1 => {
+                let rng = &mut rand::rng();
+                let equity: texture::Turn = try_load(&texture::TextureTurnVersions::V1, path);
+                let index = SuitIndex::new(2, 4);
+                let centroids = kmeans(
+                    10000,
+                    8,
+                    texture::BINS,
+                    Street::Turn,
+                    rng,
+                    |hand, community| equity.equity(hand, community, &index).to_vec(),
+                );
+
+                let mut db = Box::new(U::new(texture::BINS));
+                db.reserve(8);
+                for (i, centroid) in centroids.iter().enumerate() {
+                    db.store(i as u64, centroid);
+                }
+
+                Self {
+                    db,
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
         }
     }
 
-    #[test]
-    fn river_simulate_equity() {
-        let mut rng = rand::rng();
-        let hand = CardSet::parse("Ah Ad");
-        let community = CardSet::parse("4h 6s Js 7c Kh");
-        let bins = 10;
-        let iters = 200;
-        let output = simulate_equity(hand, community, bins, iters, None);
-        // assert_eq!(output, vec![0.0; 10]);
-        assert!(output[0] < output[9]);
+    fn to_bytes(&self) -> Vec<u8> {
+        let data = EquityData {
+            centroids: self.centroids.clone(),
+        };
+        postcard::to_allocvec(&data).unwrap()
     }
 
-    #[test]
-    fn turn_simulate_equity() {
-        let mut rng = rand::rng();
-        let hand = CardSet::parse("Ah Ad");
-        let community = CardSet::parse("4h 6s Js 7c");
-        let bins = 10;
-        let iters = 200;
-        let output = simulate_equity(hand, community, bins, iters, None);
-        // assert_eq!(output, vec![0.0; 10]);
-        assert!(output[0] < output[9]);
+    fn from_bytes(_version: &TurnGroupVersions, path: &str, bytes: &[u8]) -> Self {
+        let data: EquityData = postcard::from_bytes(bytes).unwrap();
+
+        let mut db = Box::new(U::new(texture::BINS));
+        db.reserve(8);
+        for (i, centroid) in data.centroids.iter().enumerate() {
+            db.store(i as u64, centroid);
+        }
+
+        let equity: texture::Turn = try_load(&texture::TextureTurnVersions::V1, path);
+        let index = SuitIndex::new(2, 4);
+
+        Self {
+            db,
+            centroids: data.centroids,
+            equity,
+            index,
+        }
+    }
+}
+
+impl Group for TurnGroup {
+    fn map(&self, hand: CardSet, community: CardSet) -> usize {
+        let equity = self.equity.equity(hand, community, &self.index).to_vec();
+        let (i, _distance) = self.db.query(&equity);
+        i as usize
+    }
+
+    fn size(&self) -> usize {
+        self.centroids.len()
+    }
+
+    fn repr(&self, i: usize) -> Vec<f32> {
+        self.centroids[i].clone()
+    }
+}
+
+// TODO: consider better textures (distribution like)
+pub struct RiverGroup {
+    db: Box<dyn Vectordb>,
+    centroids: Vec<EquityVector>,
+    equity: texture::River,
+    index: SuitIndex,
+}
+
+versions!(RiverGroupVersions, V1);
+
+impl Versioned<RiverGroupVersions> for RiverGroup {
+    fn build(version: &RiverGroupVersions, path: &str) -> Self {
+        match version {
+            RiverGroupVersions::V1 => {
+                let rng = &mut rand::rng();
+                let equity: texture::River = try_load(&texture::TextureRiverVersions::V1, path);
+                let index = SuitIndex::new(2, 5);
+                let centroids = kmeans(10000, 5, 1, Street::Turn, rng, |hand, community| {
+                    vec![equity.equity(hand, community, &index)]
+                });
+
+                let mut db = Box::new(U::new(1));
+                db.reserve(5);
+                for (i, centroid) in centroids.iter().enumerate() {
+                    db.store(i as u64, centroid);
+                }
+
+                Self {
+                    db,
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
+        }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let data = EquityData {
+            centroids: self.centroids.clone(),
+        };
+        postcard::to_allocvec(&data).unwrap()
+    }
+
+    fn from_bytes(_version: &RiverGroupVersions, path: &str, bytes: &[u8]) -> Self {
+        let data: EquityData = postcard::from_bytes(bytes).unwrap();
+
+        let mut db = Box::new(U::new(1));
+        db.reserve(5);
+        for (i, centroid) in data.centroids.iter().enumerate() {
+            db.store(i as u64, centroid);
+        }
+
+        let equity: texture::River = try_load(&texture::TextureRiverVersions::V1, path);
+        let index = SuitIndex::new(2, 5);
+
+        Self {
+            db,
+            centroids: data.centroids,
+            equity,
+            index,
+        }
+    }
+}
+
+impl Group for RiverGroup {
+    fn map(&self, hand: CardSet, community: CardSet) -> usize {
+        let equity = vec![self.equity.equity(hand, community, &self.index)];
+        let (i, _distance) = self.db.query(&equity);
+        i as usize
+    }
+
+    fn size(&self) -> usize {
+        self.centroids.len()
+    }
+
+    fn repr(&self, i: usize) -> Vec<f32> {
+        self.centroids[i].clone()
     }
 }

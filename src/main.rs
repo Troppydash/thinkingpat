@@ -9,9 +9,9 @@ use crate::{
         cfr::Cfr,
         random::{Caller, Raiser, Random},
     },
-    game::board::Street,
-    group::{equity::Equity, index::SuitIndex},
-    solver::engine::Solver,
+    game::{board::Street, card::CardSet},
+    group::equity::to_pdf,
+    solver::engine::{Solver, create_groups},
 };
 
 mod arena;
@@ -23,69 +23,47 @@ mod group;
 mod solver;
 mod ver;
 
-fn compute_equity_group(
-    filename: &str,
-    street: Street,
-    samples: usize,
-    num_centroids: usize,
-    bins: usize,
-) {
-    let mut seed = [0; 32];
-    seed[0] = 42;
-    let mut rng = StdRng::from_seed(seed);
+fn visualize_groups(samples: usize, path: &str) {
+    let groups = create_groups(path);
+    let rng = &mut rand::rng();
 
-    println!(
-        "info computing_equity_group with street {} samples {samples} centroids {num_centroids} bins {bins} filename {filename}",
-        street.to_string()
-    );
+    for street in Street::ALL {
+        let group = &groups[street as usize];
+        let mut table = vec![vec![]; group.size()];
+        for _ in 0..samples {
+            let (hand, community) = CardSet::sample2(rng, 2, street.visible_community());
+            let group = group.map(hand, community);
+            table[group].push((hand, community));
+        }
 
-    let group = Equity::compute(samples, num_centroids, bins, street, &mut rng);
-    group.save(filename);
-    group.visualize(&mut rng, 100);
+        for (i, entries) in table.iter().enumerate() {
+            println!("info group {} entries {}", i, entries.len());
+        }
+
+        for (i, entries) in table.iter().enumerate() {
+            println!("info group {}", i);
+            println!("info {:?}", to_pdf(&group.repr(i)));
+            for (hand, community) in entries {
+                println!("info {} | {}", hand.to_string(), community.to_string());
+            }
+        }
+    }
 }
 
-fn cfr_solve(filename: &str, street_groups: &[&str], iters: usize) {
-    let mut solver = Solver::new(|street| {
-        // if street == Street::Preflop {
-        //     return Box::new(SuitIndex::new(2, 0));
-        // }
-
-        // if street == Street::Flop {
-        //     return Box::new(SuitIndex::new(2, 3));
-        // }
-
-        let filename = street_groups[street as usize];
-        println!("info street {} filename {}", street.to_string(), filename);
-        Box::new(Equity::load(filename))
-    });
+fn cfr_solve(filename: &str, path: &str, iters: usize) {
+    let mut solver = Solver::new(path);
     solver.solve(filename, iters);
 }
 
-fn test0(filename: &str, street_groups: &[&str], iters: usize) {
-    let solver = Solver::load(filename, |street| {
-        // if street == Street::Preflop {
-        //     return Box::new(SuitIndex::new(2, 0));
-        // }
-
-        let filename = street_groups[street as usize];
-        println!("info street {} filename {}", street.to_string(), filename);
-        Box::new(Equity::load(filename))
-    });
+fn test_random(filename: &str, path: &str, iters: usize) {
+    let solver = Solver::load(filename, path);
     let cfr = Cfr::new(solver);
     let mut arena = Arena::new([Box::new(cfr), Box::new(Random)]);
     arena.play(iters);
 }
 
-fn test1(filename: &str, street_groups: &[&str], iters: usize) {
-    let solver = Solver::load(filename, |street| {
-        // if street == Street::Preflop {
-        //     return Box::new(SuitIndex::new(2, 0));
-        // }
-
-        let filename = street_groups[street as usize];
-        println!("info street {} filename {}", street.to_string(), filename);
-        Box::new(Equity::load(filename))
-    });
+fn test_equity(filename: &str, path: &str, iters: usize) {
+    let solver = Solver::load(filename, path);
     let cfr = Cfr::new(solver);
     let mut arena = Arena::new([Box::new(cfr), Box::new(bot::equity::Equity)]);
     arena.play(iters);
@@ -103,13 +81,9 @@ fn ui(args: Vec<String>) {
             }
             "group" => match parts[0] {
                 "equity" => {
-                    // street centroids bins samples filename
-                    let street: Street = parts[1].parse().unwrap();
-                    let centroids: usize = parts[2].parse().unwrap();
-                    let bins: usize = parts[3].parse().unwrap();
-                    let samples: usize = parts[4].parse().unwrap();
-                    let filename: &str = parts[5];
-                    compute_equity_group(filename, street, samples, centroids, bins);
+                    let path: &str = parts[1];
+                    let samples: usize = parts[2].parse().unwrap();
+                    visualize_groups(samples, path);
                 }
                 _ => {
                     println!("warn unknown group command {}", parts[0]);
@@ -119,39 +93,36 @@ fn ui(args: Vec<String>) {
                 "solve" => {
                     let iters: usize = parts[1].parse().unwrap();
                     let filename = parts[2];
-                    let street_groups: Vec<&str> = Street::ALL
-                        .into_iter()
-                        .map(|street| parts[3 + street as usize])
-                        .collect();
-                    cfr_solve(filename, &street_groups, iters);
+                    let path = parts[3];
+                    cfr_solve(filename, path, iters);
                 }
                 _ => {
                     println!("warn unknown cfr command {}", parts[0]);
                 }
             },
-            "play" => match parts[0] {
-                "test0" => {
-                    let iters: usize = parts[1].parse().unwrap();
-                    let filename = parts[2];
-                    let street_groups: Vec<&str> = Street::ALL
-                        .into_iter()
-                        .map(|street| parts[3 + street as usize])
-                        .collect();
-                    test0(filename, &street_groups, iters);
-                }
-                "test1" => {
-                    let iters: usize = parts[1].parse().unwrap();
-                    let filename = parts[2];
-                    let street_groups: Vec<&str> = Street::ALL
-                        .into_iter()
-                        .map(|street| parts[3 + street as usize])
-                        .collect();
-                    test1(filename, &street_groups, iters);
-                }
-                _ => {
-                    panic!("");
-                }
-            },
+            // "play" => match parts[0] {
+            //     "test0" => {
+            //         let iters: usize = parts[1].parse().unwrap();
+            //         let filename = parts[2];
+            //         let street_groups: Vec<&str> = Street::ALL
+            //             .into_iter()
+            //             .map(|street| parts[3 + street as usize])
+            //             .collect();
+            //         test0(filename, &street_groups, iters);
+            //     }
+            //     "test1" => {
+            //         let iters: usize = parts[1].parse().unwrap();
+            //         let filename = parts[2];
+            //         let street_groups: Vec<&str> = Street::ALL
+            //             .into_iter()
+            //             .map(|street| parts[3 + street as usize])
+            //             .collect();
+            //         test1(filename, &street_groups, iters);
+            //     }
+            //     _ => {
+            //         panic!("");
+            //     }
+            // },
             _ => {
                 println!("warn unknown command {}", command);
             }
