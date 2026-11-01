@@ -2,22 +2,16 @@ use core::panic;
 use std::{
     fs::File,
     io::{self, BufReader, BufWriter, Read, Write},
+    time::Instant,
 };
 
 use arrayvec::ArrayVec;
 use fxhash::FxHashMap;
-use rand::{
-    Rng, RngExt,
-    distr::{Distribution, weighted::WeightedIndex},
-};
+use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
 
 use crate::{
-    game::{
-        board::{Action, Board, CardState, Outcome, Player, Street},
-        card::CardSet,
-    },
+    game::board::{Action, Board, CardState, Outcome, Player, Street},
     group::{
         equity::{
             FlopGroup, FlopGroupVersions, PreflopGroup, PreflopGroupVersions, RiverGroup,
@@ -28,15 +22,9 @@ use crate::{
     ver::try_load,
 };
 
-pub const MAX_ACTION_LENGTH: usize = 4 * 5;
 pub const MAX_ACTIONS: usize = 3;
 type Actions = [f32; MAX_ACTIONS];
-
-// arbitrary 20
 type Belief = Vec<(Board, f64)>;
-
-const CHECKPOINT_BUFFER_SIZE: usize = 64 * 1024;
-
 type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 
 #[repr(C)]
@@ -91,6 +79,7 @@ struct BettingNode {
 }
 
 pub struct Solver {
+    // TODO: this can be reordered for perf
     nodes: Vec<BettingNode>,
     street_groups: [Box<dyn Group>; Street::COUNT],
     iters: usize,
@@ -105,12 +94,16 @@ impl Solver {
         }
     }
 
+    fn estimate_tree(&self) -> usize {
+        2usize.pow(4 * 4)
+    }
+
     fn estimate_memory(&self) -> usize {
         self.street_groups
             .iter()
             .map(|g| g.size())
             .product::<usize>()
-            * (2usize.pow(3 * 4))
+            * self.estimate_tree()
     }
 
     fn make_board_group(&self, board: &Board) -> BoardGroups {
@@ -185,16 +178,21 @@ impl Solver {
 
     fn make_betting_tree(&mut self) {
         self.nodes.clear();
-        self.nodes.reserve(self.estimate_memory());
+        self.nodes.reserve(self.estimate_tree());
         self.traverse(&Board::new());
     }
 
     #[inline]
-    fn regret_matching(&mut self, data: &InfosetData, actions: usize) -> Actions {
+    fn regret_matching(
+        &mut self,
+        data: &InfosetData,
+        actions: usize,
+        rng: &mut impl Rng,
+    ) -> Actions {
         let regrets = &data.regret_sum;
         let total: f64 = regrets[..actions].iter().map(|x| x.max(0.0) as f64).sum();
         let mut strategy = [0.0; MAX_ACTIONS];
-        if total < f64::EPSILON || rand::rng().random_ratio(1, 10000) {
+        if total < f64::EPSILON || rng.random_ratio(1, 10000) {
             strategy[..actions].fill(1.0 / actions as f32);
         } else {
             for i in 0..actions {
@@ -225,6 +223,7 @@ impl Solver {
         board: &Board,
         node: Option<usize>,
         board_group: &BoardGroups,
+        rng: &mut impl Rng,
     ) -> f64 {
         // terminal
         if let Outcome::Winnings(winnings) = board.outcome() {
@@ -241,19 +240,41 @@ impl Solver {
         let actions = board.get_actions();
         let group = board_group[board.stm() as usize][board.street() as usize];
         let data = self.nodes[node].policy[group];
-        let strategy = self.regret_matching(&data, actions.len());
 
-        let mut counterfactual_value = [0.0_f64; MAX_ACTIONS];
+        let mut new_boards: ArrayVec<Board, MAX_ACTIONS> = ArrayVec::new();
         for (i, action) in actions.iter().enumerate() {
             let mut new_board = board.clone();
             new_board.play(*action);
 
+            let child_node = self.nodes[node].children[i];
+
+            // prefetch
+            if let Some(child_node) = child_node {
+                let child_group =
+                    board_group[new_board.stm() as usize][new_board.street() as usize];
+                unsafe {
+                    use std::arch::x86_64::{_MM_HINT_ET0, _mm_prefetch};
+                    _mm_prefetch(
+                        self.nodes[child_node].policy.as_ptr().add(child_group) as *const i8,
+                        _MM_HINT_ET0,
+                    );
+                }
+            }
+
+            new_boards.push(new_board);
+        }
+
+        let strategy = self.regret_matching(&data, actions.len(), rng);
+
+        let mut counterfactual_value = [0.0_f64; MAX_ACTIONS];
+        for (i, new_board) in new_boards.iter().enumerate() {
+            let child_node = self.nodes[node].children[i];
+
             let mut reach_prob = reach_prob.clone();
             reach_prob[board.stm() as usize] *= strategy[i] as f64;
 
-            let child_node = self.nodes[node].children[i];
             counterfactual_value[i] = adjust_sign(
-                self.cfr(&reach_prob, &new_board, child_node, board_group),
+                self.cfr(&reach_prob, new_board, child_node, board_group, rng),
                 board.stm(),
                 new_board.stm(),
             );
@@ -499,17 +520,22 @@ impl Solver {
             self.make_betting_tree();
         }
 
-        // let mut rng = rand::rng();
+        let mut rng = rand::rng();
 
         let target = self.iters + iters;
+        let start = Instant::now();
         while self.iters < target {
             if self.iters % 5000 == 0 {
-                println!("info cfr iter {}", self.iters);
+                println!(
+                    "info cfr iter {} iter/s {}",
+                    self.iters,
+                    self.iters as u64 * 1000 / (start.elapsed().as_millis() as u64).max(1)
+                );
             }
             let board = Board::new();
             let board_groups = self.make_board_group(&board);
             let reach_prob = [1.0; Player::COUNT];
-            self.cfr(&reach_prob, &board, Some(0), &board_groups);
+            self.cfr(&reach_prob, &board, Some(0), &board_groups, &mut rng);
             // for player in Player::ALL {
             //     self.mc_cfr(player, &board, &mut history, &board_groups, &mut rng);
             // }
@@ -528,9 +554,13 @@ impl Solver {
         }
     }
 
-    pub fn save(&self, filename: &str) {
-        let mut writer =
-            BufWriter::with_capacity(CHECKPOINT_BUFFER_SIZE, File::create(filename).unwrap());
+    const CHECKPOINT_BUFFER_SIZE: usize = 64 * 1024;
+
+    fn save(&self, filename: &str) {
+        let mut writer = BufWriter::with_capacity(
+            Self::CHECKPOINT_BUFFER_SIZE,
+            File::create(filename).unwrap(),
+        );
         writer
             .write_all(&(self.nodes.len() as u64).to_le_bytes())
             .unwrap();
@@ -546,7 +576,7 @@ impl Solver {
 
     pub fn load(filename: &str, path: &str) -> Self {
         let mut reader =
-            BufReader::with_capacity(CHECKPOINT_BUFFER_SIZE, File::open(filename).unwrap());
+            BufReader::with_capacity(Self::CHECKPOINT_BUFFER_SIZE, File::open(filename).unwrap());
 
         let mut solver = Self::new(path);
 
@@ -567,22 +597,35 @@ impl Solver {
     }
 
     pub fn lookup(&mut self, board: &Board, history: &[Action]) -> Actions {
-        todo!()
-        // let card = board.card_state();
-        // let hand = card.hands[board.stm() as usize];
-        // let mut group = self.street_groups[Street::Preflop as usize].map(hand, CardSet::EMPTY);
-        // for street in 1..=(board.street() as usize) {
-        //     group = group * self.street_groups[street].size()
-        //         + self.street_groups[street].map(
-        //             hand,
-        //             card.community[..Street::ALL[street].visible_community()]
-        //                 .iter()
-        //                 .cloned()
-        //                 .collect(),
-        //         );
-        // }
+        let mut node = 0;
 
-        // let infoset = Infoset::new(board.street(), group, history);
-        // self.average_strategy(&infoset, board.get_actions().len())
+        for action in history.iter() {
+            // a bit hacky but whatever
+            let index = match *action {
+                Action::Fold => 0,
+                Action::Call => 1,
+                Action::Raise(_) => 2,
+            };
+
+            node = self.nodes[node].children[index].unwrap();
+        }
+
+        let cards = board.card_state();
+        let mut group = 0;
+        for street in Street::ALL {
+            if street > board.street() {
+                break;
+            }
+
+            let community = cards.community[..street.visible_community()]
+                .iter()
+                .copied()
+                .collect();
+
+            let g = &self.street_groups[street as usize];
+            group = group * g.size() + g.map(cards.hands[board.stm() as usize], community)
+        }
+
+        self.average_strategy(&self.nodes[node].policy[group], board.get_actions().len())
     }
 }

@@ -103,29 +103,23 @@ fn ui(args: Vec<String>) {
                     println!("warn unknown cfr command {}", parts[0]);
                 }
             },
-            // "play" => match parts[0] {
-            //     "test0" => {
-            //         let iters: usize = parts[1].parse().unwrap();
-            //         let filename = parts[2];
-            //         let street_groups: Vec<&str> = Street::ALL
-            //             .into_iter()
-            //             .map(|street| parts[3 + street as usize])
-            //             .collect();
-            //         test0(filename, &street_groups, iters);
-            //     }
-            //     "test1" => {
-            //         let iters: usize = parts[1].parse().unwrap();
-            //         let filename = parts[2];
-            //         let street_groups: Vec<&str> = Street::ALL
-            //             .into_iter()
-            //             .map(|street| parts[3 + street as usize])
-            //             .collect();
-            //         test1(filename, &street_groups, iters);
-            //     }
-            //     _ => {
-            //         panic!("");
-            //     }
-            // },
+            "play" => {
+                let path = parts[1];
+                let filename = parts[2];
+                let iters: usize = parts[3].parse().unwrap();
+
+                match parts[0] {
+                    "random" => {
+                        test_random(filename, path, iters);
+                    }
+                    "equity" => {
+                        test_equity(filename, path, iters);
+                    }
+                    _ => {
+                        panic!("");
+                    }
+                }
+            }
             _ => {
                 println!("warn unknown command {}", command);
             }
