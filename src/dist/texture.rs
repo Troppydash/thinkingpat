@@ -33,12 +33,67 @@ fn iterate_opp_hands(remain: CardSet, mut f: impl FnMut(CardSet, usize)) {
     });
 }
 
+/// Computes equities[pair] = equities of that pair under [texture]
+fn river_equities(texture: CardSet) -> Vec<u16> {
+    // we do a neat trick of:
+    // 1. compute forall hand in evaluate(hand, texture)
+    // 2. sort by eval
+    // 3. two pointers
+
+    // list of (eval, weaker, stronger) sorted by eval
+    let mut hands = Vec::with_capacity(choose_usize(52 - 5, 2));
+    iterate_opp_hands(!texture, |hand, _| {
+        let pairs = hand.take::<2>();
+        hands.push((showdown::evaluate(hand | texture), pairs[0], pairs[1]));
+    });
+    hands.sort_unstable_by_key(|h| h.0);
+
+    let mut equities = vec![MISSING; PAIRS];
+    let mut weaker_by_card = [0usize; Card::COUNT];
+    let mut start = 0;
+    while start < hands.len() {
+        // start..end has the same eval
+        let mut end = start + 1;
+        while end < hands.len() && hands[end].0 == hands[start].0 {
+            end += 1;
+        }
+
+        // we need to adjust for opp hands exclusive of our hand
+        // ties_by_card[card] = #opp_hands tied to this eval with card
+        // weaker_by_card[card] = #opp_hands worse than you with card
+
+        let tied_hands = &hands[start..end];
+        let mut ties_by_card = [0usize; Card::COUNT];
+        for &(_, first, second) in tied_hands {
+            ties_by_card[first.index()] += 1;
+            ties_by_card[second.index()] += 1;
+        }
+
+        for &(_, first, second) in tied_hands {
+            let wins = start - weaker_by_card[first.index()] - weaker_by_card[second.index()];
+
+            // this subs this exact hand twice so +1
+            let ties =
+                tied_hands.len() + 1 - ties_by_card[first.index()] - ties_by_card[second.index()];
+
+            equities[pair_index(first.index(), second.index())] = (2 * wins + ties) as u16;
+        }
+
+        for &(_, first, second) in tied_hands {
+            weaker_by_card[first.index()] += 1;
+            weaker_by_card[second.index()] += 1;
+        }
+
+        start = end;
+    }
+
+    equities
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct River {
     /// (hand, texture) index -> equity
     values: Vec<u16>,
-    /// for caching only, texture index -> pair -> equity
-    river_trick: Vec<Vec<u16>>,
 }
 
 versions!(TextureRiverVersions, V1);
@@ -53,74 +108,16 @@ impl Versioned<TextureRiverVersions> for River {
         let texture_index = SuitIndex::new(0, community_cards);
 
         let mut values = vec![MISSING; full_index.size()];
-        let mut river_trick = vec![vec![0; PAIRS]; texture_index.size()];
         for i in 0..texture_index.size() {
             let (_empty_hand, texture) = texture_index.unmap(i);
 
-            // we do a neat trick of:
-            // 1. compute forall hand in evaluate(hand, texture)
-            // 2. sort by eval
-            // 3. two pointers
-
-            // list of (eval, weaker, stronger) sorted by eval
-            let mut hands = Vec::with_capacity(choose_usize(52 - community_cards, 2));
-            iterate_opp_hands(!texture, |hand, _| {
-                let pairs = hand.take::<2>();
-                hands.push((showdown::evaluate(hand | texture), pairs[0], pairs[1]));
-            });
-            hands.sort_unstable_by_key(|h| h.0);
-
-            // equities[our hand]
-            let equities = &mut river_trick[i];
-            let mut weaker_by_card = [0usize; Card::COUNT];
-            let mut start = 0;
-            while start < hands.len() {
-                // start..end has the same eval
-                let mut end = start + 1;
-                while end < hands.len() && hands[end].0 == hands[start].0 {
-                    end += 1;
-                }
-
-                // we need to adjust for opp hands exclusive of our hand
-                // ties_by_card[card] = #opp_hands tied to this eval with card
-                // weaker_by_card[card] = #opp_hands worse than you with card
-
-                let tied_hands = &hands[start..end];
-                let mut ties_by_card = [0usize; Card::COUNT];
-                for &(_, first, second) in tied_hands {
-                    ties_by_card[first.index()] += 1;
-                    ties_by_card[second.index()] += 1;
-                }
-
-                for &(_, first, second) in tied_hands {
-                    let wins =
-                        start - weaker_by_card[first.index()] - weaker_by_card[second.index()];
-
-                    // this subs this exact hand twice so +1
-                    let ties = tied_hands.len() + 1
-                        - ties_by_card[first.index()]
-                        - ties_by_card[second.index()];
-
-                    equities[pair_index(first.index(), second.index())] = (2 * wins + ties) as u16;
-                }
-
-                for &(_, first, second) in tied_hands {
-                    weaker_by_card[first.index()] += 1;
-                    weaker_by_card[second.index()] += 1;
-                }
-
-                start = end;
-            }
-
+            let equities = river_equities(texture);
             iterate_opp_hands(!texture, |hand, pair| {
                 values[full_index.map(hand, texture)] = equities[pair];
             });
         }
 
-        Self {
-            values,
-            river_trick,
-        }
+        Self { values }
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -156,13 +153,9 @@ impl Versioned<TextureTurnVersions> for Turn {
     fn build(version: &TextureTurnVersions, path: &str) -> Self {
         assert!(*version == TextureTurnVersions::V1);
 
-        let river: River = ver::try_load(&TextureRiverVersions::V1, path);
-
         let community_cards = Street::Turn.visible_community();
         let full_index = SuitIndex::new(2, community_cards);
         let texture_index = SuitIndex::new(0, community_cards);
-
-        let river_index = SuitIndex::new(0, Street::River.visible_community());
 
         let mut values = vec![[0u8; BINS]; full_index.size()];
         for i in 0..texture_index.size() {
@@ -171,11 +164,10 @@ impl Versioned<TextureTurnVersions> for Turn {
             // hist[our hand] = equity distribution
             let mut histograms = [[0u8; BINS]; PAIRS];
             CardSet::iterate_community(!texture, 1, |community| {
-                let equities =
-                    &river.river_trick[river_index.map(CardSet::EMPTY, texture | community)];
+                let equities = river_equities(texture | community);
                 for (hist, equity) in histograms.iter_mut().zip(equities) {
-                    if *equity != MISSING {
-                        hist[equity_bin(*equity)] += 1;
+                    if equity != MISSING {
+                        hist[equity_bin(equity)] += 1;
                     }
                 }
             });
@@ -199,7 +191,7 @@ impl Versioned<TextureTurnVersions> for Turn {
 
 impl Turn {
     pub fn equity(&self, hand: CardSet, community: CardSet, index: &SuitIndex) -> [f32; BINS] {
-        const DENOM: u64 = choose(52 - 4, 1);
+        const DENOM: u64 = choose(46, 1);
         let mut iter = self.values[index.map(hand, community)]
             .iter()
             .map(|e| *e as f32 / DENOM as f32);
@@ -221,13 +213,9 @@ impl Versioned<TextureFlopVersions> for Flop {
     fn build(version: &TextureFlopVersions, path: &str) -> Self {
         assert!(*version == TextureFlopVersions::V1);
 
-        let river: River = ver::try_load(&TextureRiverVersions::V1, path);
-
         let community_cards = Street::Flop.visible_community();
         let full_index = SuitIndex::new(2, community_cards);
         let texture_index = SuitIndex::new(0, community_cards);
-
-        let river_index = SuitIndex::new(0, Street::River.visible_community());
 
         let mut values = vec![[0u16; BINS]; full_index.size()];
         for i in 0..texture_index.size() {
@@ -236,11 +224,10 @@ impl Versioned<TextureFlopVersions> for Flop {
             // hist[our hand] = equity distribution
             let mut histograms = [[0u16; BINS]; PAIRS];
             CardSet::iterate_community(!texture, 2, |community| {
-                let equities =
-                    &river.river_trick[river_index.map(CardSet::EMPTY, texture | community)];
+                let equities = river_equities(texture | community);
                 for (hist, equity) in histograms.iter_mut().zip(equities) {
-                    if *equity != MISSING {
-                        hist[equity_bin(*equity)] += 1;
+                    if equity != MISSING {
+                        hist[equity_bin(equity)] += 1;
                     }
                 }
             });
@@ -264,7 +251,7 @@ impl Versioned<TextureFlopVersions> for Flop {
 
 impl Flop {
     pub fn equity(&self, hand: CardSet, community: CardSet, index: &SuitIndex) -> [f32; BINS] {
-        const DENOM: u64 = choose(52 - 3, 2);
+        const DENOM: u64 = choose(47, 2);
         let mut iter = self.values[index.map(hand, community)]
             .iter()
             .map(|e| *e as f32 / DENOM as f32);

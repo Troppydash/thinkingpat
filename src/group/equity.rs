@@ -87,6 +87,20 @@ fn kmeans(
             db.store(i as u64, centroid);
         }
 
+        if iter % 10 == 0 {
+            // within-cluster-sum-of-squares
+            let mut cost = 0.0;
+            for sample in points.iter() {
+                let (_centroid, distance) = db.query(&sample);
+                cost += distance * distance;
+            }
+
+            println!(
+                "info within_cluster_sum_of_squares {}",
+                cost / centroids.len() as f32
+            );
+        }
+
         // find closest centroid per point
         let mut new_centroids: Vec<Vec<usize>> = vec![vec![]; num_centroids];
         for (i, point) in points.iter().enumerate() {
@@ -94,6 +108,7 @@ fn kmeans(
             new_centroids[centroid as usize].push(i);
         }
 
+        // TODO: this doesn't minimize L1
         // each centroid = average of points
         for (centroid, close_points) in new_centroids.iter().enumerate() {
             if close_points.is_empty() {
@@ -108,20 +123,6 @@ fn kmeans(
                     centroid[k] += points[*p][k] / close_points.len() as f32;
                 }
             }
-        }
-
-        if iter % 10 == 0 {
-            // within-cluster-sum-of-squares
-            let mut cost = 0.0;
-            for sample in points.iter() {
-                let (_centroid, distance) = db.query(&sample);
-                cost += distance * distance;
-            }
-
-            println!(
-                "info within_cluster_sum_of_squares {}",
-                cost / centroids.len() as f32
-            );
         }
     }
 
