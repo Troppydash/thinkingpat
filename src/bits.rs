@@ -15,7 +15,6 @@ pub fn pext(x: u64, mut mask: u64) -> u64 {
             }
             mask &= !bit;
             i += 1;
-
         }
 
         out

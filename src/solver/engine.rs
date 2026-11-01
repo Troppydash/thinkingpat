@@ -249,15 +249,34 @@ impl Solver {
             let child_node = self.nodes[node].children[i];
 
             // prefetch
-            if let Some(child_node) = child_node {
-                let child_group =
-                    board_group[new_board.stm() as usize][new_board.street() as usize];
-                unsafe {
-                    use std::arch::x86_64::{_MM_HINT_ET0, _mm_prefetch};
-                    _mm_prefetch(
-                        self.nodes[child_node].policy.as_ptr().add(child_group) as *const i8,
-                        _MM_HINT_ET0,
-                    );
+            #[cfg(target_arch = "x86_64")]
+            {
+                if let Some(child_node) = child_node {
+                    let child_group =
+                        board_group[new_board.stm() as usize][new_board.street() as usize];
+                    unsafe {
+                        use std::arch::x86_64::{_MM_HINT_ET0, _mm_prefetch};
+                        _mm_prefetch(
+                            self.nodes[child_node].policy.as_ptr().add(child_group) as *const i8,
+                            _MM_HINT_ET0,
+                        );
+                    }
+                }
+            }
+
+            #[cfg(target_arch = "aarch64")]
+            {
+                if let Some(child_node) = child_node {
+                    let child_group =
+                        board_group[new_board.stm() as usize][new_board.street() as usize];
+                    unsafe {
+                        use core::arch::aarch64::{
+                            _PREFETCH_LOCALITY0, _PREFETCH_WRITE, _prefetch,
+                        };
+                        _prefetch::<_PREFETCH_WRITE, _PREFETCH_LOCALITY0>(
+                            self.nodes[child_node].policy.as_ptr().add(child_group) as *const i8,
+                        );
+                    }
                 }
             }
 

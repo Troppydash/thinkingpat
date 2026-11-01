@@ -1,14 +1,12 @@
+#![feature(stdarch_aarch64_prefetch)]
+
 use core::panic;
 
-use rand::{SeedableRng, rngs::StdRng};
 use rustyline::DefaultEditor;
 
 use crate::{
     arena::Arena,
-    bot::{
-        cfr::Cfr,
-        random::{Caller, Raiser, Random},
-    },
+    bot::{cfr::Cfr, random::Random},
     game::{board::Street, card::CardSet},
     group::equity::to_pdf,
     solver::engine::{Solver, create_groups},
