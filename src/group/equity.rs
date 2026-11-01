@@ -50,7 +50,7 @@ fn kmeans(
     get_equity: impl Fn(CardSet, CardSet) -> Vec<f32>,
 ) -> Vec<EquityVector> {
     println!(
-        "info equity {} estimated memory {} MB",
+        "info kmeans equity {} estimated memory {} MB",
         street.to_string(),
         bins * size_of::<f32>() * num_centroids / 1024 / 1024
     );
@@ -60,7 +60,7 @@ fn kmeans(
     points.reserve_exact(samples);
     for i in 0..samples {
         if i % 2000 == 0 {
-            println!("debug samples {}", i);
+            println!("info kmeans samples {}", i);
         }
 
         let (hand, community) = CardSet::sample2(rng, 2, street.visible_community());
@@ -68,7 +68,12 @@ fn kmeans(
         points.push(equity);
     }
 
-    let mut centroids: Vec<EquityVector> = rand::seq::index::sample(rng, samples, num_centroids)
+    // dedup
+    points.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    points.dedup();
+    assert!(points.len() >= num_centroids);
+
+    let mut centroids: Vec<EquityVector> = rand::seq::index::sample(rng, points.len(), num_centroids)
         .into_iter()
         .map(|i| points[i].clone())
         .collect();
@@ -92,11 +97,11 @@ fn kmeans(
             let mut cost = 0.0;
             for sample in points.iter() {
                 let (_centroid, distance) = db.query(&sample);
-                cost += distance * distance;
+                cost += distance.abs();
             }
 
             println!(
-                "info within_cluster_sum_of_squares {}",
+                "info kmeans within_cluster_l1 {}",
                 cost / centroids.len() as f32
             );
         }
@@ -108,8 +113,6 @@ fn kmeans(
             new_centroids[centroid as usize].push(i);
         }
 
-        // TODO: this doesn't minimize L1
-        // each centroid = average of points
         for (centroid, close_points) in new_centroids.iter().enumerate() {
             if close_points.is_empty() {
                 // this can be bad
@@ -117,11 +120,13 @@ fn kmeans(
             }
 
             let centroid = &mut centroids[centroid];
-            centroid.fill(0.0);
-            for p in close_points {
-                for k in 0..bins {
-                    centroid[k] += points[*p][k] / close_points.len() as f32;
-                }
+
+            // use median to minimize L1
+            for k in 0..bins {
+                let mut values: Vec<f32> = close_points.iter().map(|&p| points[p][k]).collect();
+                let middle = values.len() / 2;
+                values.select_nth_unstable_by(middle, f32::total_cmp);
+                centroid[k] = values[middle];
             }
         }
     }
@@ -152,7 +157,7 @@ impl Versioned<PreflopGroupVersions> for PreflopGroup {
                 let index = SuitIndex::new(2, 0);
                 let centroids = kmeans(
                     10000,
-                    20,
+                    10,
                     sample::BINS,
                     Street::Preflop,
                     rng,
@@ -160,7 +165,7 @@ impl Versioned<PreflopGroupVersions> for PreflopGroup {
                 );
 
                 let mut db = Box::new(U::new(sample::BINS));
-                db.reserve(20);
+                db.reserve(10);
                 for (i, centroid) in centroids.iter().enumerate() {
                     db.store(i as u64, centroid);
                 }
@@ -186,7 +191,7 @@ impl Versioned<PreflopGroupVersions> for PreflopGroup {
         let data: EquityData = postcard::from_bytes(bytes).unwrap();
 
         let mut db = Box::new(U::new(sample::BINS));
-        db.reserve(20);
+        db.reserve(10);
         for (i, centroid) in data.centroids.iter().enumerate() {
             db.store(i as u64, centroid);
         }
@@ -237,7 +242,7 @@ impl Versioned<FlopGroupVersions> for FlopGroup {
                 let index = SuitIndex::new(2, 3);
                 let centroids = kmeans(
                     10000,
-                    20,
+                    10,
                     texture::BINS,
                     Street::Flop,
                     rng,
@@ -245,7 +250,7 @@ impl Versioned<FlopGroupVersions> for FlopGroup {
                 );
 
                 let mut db = Box::new(U::new(texture::BINS));
-                db.reserve(20);
+                db.reserve(10);
                 for (i, centroid) in centroids.iter().enumerate() {
                     db.store(i as u64, centroid);
                 }
@@ -271,7 +276,7 @@ impl Versioned<FlopGroupVersions> for FlopGroup {
         let data: EquityData = postcard::from_bytes(bytes).unwrap();
 
         let mut db = Box::new(U::new(texture::BINS));
-        db.reserve(20);
+        db.reserve(10);
         for (i, centroid) in data.centroids.iter().enumerate() {
             db.store(i as u64, centroid);
         }
@@ -406,12 +411,12 @@ impl Versioned<RiverGroupVersions> for RiverGroup {
                 let rng = &mut rand::rng();
                 let equity: texture::River = try_load(&texture::TextureRiverVersions::V1, path);
                 let index = SuitIndex::new(2, 5);
-                let centroids = kmeans(10000, 10, 1, Street::River, rng, |hand, community| {
+                let centroids = kmeans(10000, 8, 1, Street::River, rng, |hand, community| {
                     vec![equity.equity(hand, community, &index)]
                 });
 
                 let mut db = Box::new(U::new(1));
-                db.reserve(10);
+                db.reserve(8);
                 for (i, centroid) in centroids.iter().enumerate() {
                     db.store(i as u64, centroid);
                 }
@@ -437,7 +442,7 @@ impl Versioned<RiverGroupVersions> for RiverGroup {
         let data: EquityData = postcard::from_bytes(bytes).unwrap();
 
         let mut db = Box::new(U::new(1));
-        db.reserve(10);
+        db.reserve(8);
         for (i, centroid) in data.centroids.iter().enumerate() {
             db.store(i as u64, centroid);
         }
