@@ -38,7 +38,7 @@ pub fn to_pdf(cdf: &[f32]) -> Vec<f32> {
     delta
 }
 
-const KMEANS_ITERS: usize = 200;
+const KMEANS_ITERS: usize = 100;
 
 /// hand equity distribution k means sample indexing
 fn kmeans(
@@ -58,10 +58,10 @@ fn kmeans(
     // sample points
     let mut points: Vec<EquityVector> = vec![];
     points.reserve_exact(samples);
-    for i in 0..samples {
-        if i % 2000 == 0 {
-            println!("info kmeans samples {}", i);
-        }
+    for _i in 0..samples {
+        // if i % 2000 == 0 {
+        //     println!("info kmeans samples {}", i);
+        // }
 
         let (hand, community) = CardSet::sample2(rng, 2, street.visible_community());
         let equity = to_cdf(&get_equity(hand, community));
@@ -73,16 +73,17 @@ fn kmeans(
     points.dedup();
     assert!(points.len() >= num_centroids);
 
-    let mut centroids: Vec<EquityVector> = rand::seq::index::sample(rng, points.len(), num_centroids)
-        .into_iter()
-        .map(|i| points[i].clone())
-        .collect();
+    let mut centroids: Vec<EquityVector> =
+        rand::seq::index::sample(rng, points.len(), num_centroids)
+            .into_iter()
+            .map(|i| points[i].clone())
+            .collect();
 
     let mut db = U::new(bins);
 
     // k means iteration
     for iter in 0..KMEANS_ITERS {
-        if iter % 50 == 0 {
+        if iter % 100 == 0 {
             println!("info kmeans iter {}", iter);
         }
 
@@ -100,10 +101,7 @@ fn kmeans(
                 cost += distance.abs();
             }
 
-            println!(
-                "info kmeans within_cluster_l1 {}",
-                cost / centroids.len() as f32
-            );
+            println!("info kmeans within_cluster_l1 {}", cost as f32);
         }
 
         // find closest centroid per point
@@ -113,6 +111,7 @@ fn kmeans(
             new_centroids[centroid as usize].push(i);
         }
 
+        let mut changed = false;
         for (centroid, close_points) in new_centroids.iter().enumerate() {
             if close_points.is_empty() {
                 // this can be bad
@@ -126,12 +125,32 @@ fn kmeans(
                 let mut values: Vec<f32> = close_points.iter().map(|&p| points[p][k]).collect();
                 let middle = values.len() / 2;
                 values.select_nth_unstable_by(middle, f32::total_cmp);
+
+                if (centroid[k] - values[middle]).abs() < 0.0001 {
+                    changed = true;
+                }
+
                 centroid[k] = values[middle];
             }
+        }
+
+        if !changed {
+            println!("info kmeans early exit");
+            break;
         }
     }
 
     centroids
+}
+
+fn make_db(centroids: &Vec<EquityVector>, bins: usize) -> Box<U> {
+    let mut db = Box::new(U::new(bins));
+    db.reserve(centroids.len());
+    for (i, centroid) in centroids.iter().enumerate() {
+        db.store(i as u64, centroid);
+    }
+
+    db
 }
 
 #[derive(Serialize, Deserialize)]
@@ -146,15 +165,16 @@ pub struct PreflopGroup {
     index: SuitIndex,
 }
 
-versions!(PreflopGroupVersions, V1);
+versions!(PreflopGroupVersions, V1, V2, Elbow);
 
 impl Versioned<PreflopGroupVersions> for PreflopGroup {
     fn build(version: &PreflopGroupVersions, path: &str) -> Self {
+        let rng = &mut rand::rng();
+        let index = SuitIndex::new(2, 0);
+        let equity: sample::Preflop = try_load(&sample::SamplePreflopVersions::V1, path);
+
         match version {
             PreflopGroupVersions::V1 => {
-                let rng = &mut rand::rng();
-                let equity: sample::Preflop = try_load(&sample::SamplePreflopVersions::V1, path);
-                let index = SuitIndex::new(2, 0);
                 let centroids = kmeans(
                     10000,
                     10,
@@ -164,14 +184,57 @@ impl Versioned<PreflopGroupVersions> for PreflopGroup {
                     |hand, _community| equity.equity(hand, &index).to_vec(),
                 );
 
-                let mut db = Box::new(U::new(sample::BINS));
-                db.reserve(10);
-                for (i, centroid) in centroids.iter().enumerate() {
-                    db.store(i as u64, centroid);
+                Self {
+                    db: make_db(&centroids, sample::BINS),
+                    centroids,
+                    equity,
+                    index,
                 }
+            }
+            PreflopGroupVersions::V2 => {
+                let groups = 32;
+                let centroids = kmeans(
+                    10000,
+                    groups,
+                    sample::BINS,
+                    Street::Preflop,
+                    rng,
+                    |hand, _community| equity.equity(hand, &index).to_vec(),
+                );
 
                 Self {
-                    db,
+                    db: make_db(&centroids, sample::BINS),
+
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
+            PreflopGroupVersions::Elbow => {
+                for groups in [1, 2, 4, 8, 16, 32, 64, 128] {
+                    println!("info preflop elbow {}", groups);
+                    _ = kmeans(
+                        10000,
+                        groups,
+                        sample::BINS,
+                        Street::Preflop,
+                        rng,
+                        |hand, _community| equity.equity(hand, &index).to_vec(),
+                    );
+                }
+
+                let groups = 1;
+                let centroids = kmeans(
+                    10000,
+                    groups,
+                    sample::BINS,
+                    Street::Preflop,
+                    rng,
+                    |hand, _community| equity.equity(hand, &index).to_vec(),
+                );
+
+                Self {
+                    db: make_db(&centroids, sample::BINS),
                     centroids,
                     equity,
                     index,
@@ -187,23 +250,35 @@ impl Versioned<PreflopGroupVersions> for PreflopGroup {
         postcard::to_allocvec(&data).unwrap()
     }
 
-    fn from_bytes(_version: &PreflopGroupVersions, path: &str, bytes: &[u8]) -> Self {
+    fn from_bytes(version: &PreflopGroupVersions, path: &str, bytes: &[u8]) -> Self {
         let data: EquityData = postcard::from_bytes(bytes).unwrap();
-
-        let mut db = Box::new(U::new(sample::BINS));
-        db.reserve(10);
-        for (i, centroid) in data.centroids.iter().enumerate() {
-            db.store(i as u64, centroid);
-        }
-
         let equity: sample::Preflop = try_load(&sample::SamplePreflopVersions::V1, path);
         let index = SuitIndex::new(2, 0);
 
-        Self {
-            db,
-            centroids: data.centroids,
-            equity,
-            index,
+        match *version {
+            PreflopGroupVersions::V1 => Self {
+                db: make_db(&data.centroids, sample::BINS),
+                centroids: data.centroids,
+                equity,
+                index,
+            },
+            PreflopGroupVersions::V2 => Self {
+                db: make_db(&data.centroids, sample::BINS),
+                centroids: data.centroids,
+                equity,
+                index,
+            },
+            PreflopGroupVersions::Elbow => {
+                unimplemented!()
+            }
+        }
+    }
+
+    fn should_cache(version: &PreflopGroupVersions) -> bool {
+        match *version {
+            PreflopGroupVersions::V1 => true,
+            PreflopGroupVersions::V2 => true,
+            PreflopGroupVersions::Elbow => false,
         }
     }
 }
@@ -231,15 +306,16 @@ pub struct FlopGroup {
     index: SuitIndex,
 }
 
-versions!(FlopGroupVersions, V1);
+versions!(FlopGroupVersions, V1, V2, Elbow);
 
 impl Versioned<FlopGroupVersions> for FlopGroup {
     fn build(version: &FlopGroupVersions, path: &str) -> Self {
+        let rng = &mut rand::rng();
+        let equity: texture::Flop = try_load(&texture::TextureFlopVersions::V1, path);
+        let index = SuitIndex::new(2, 3);
+
         match version {
             FlopGroupVersions::V1 => {
-                let rng = &mut rand::rng();
-                let equity: texture::Flop = try_load(&texture::TextureFlopVersions::V1, path);
-                let index = SuitIndex::new(2, 3);
                 let centroids = kmeans(
                     10000,
                     10,
@@ -249,14 +325,55 @@ impl Versioned<FlopGroupVersions> for FlopGroup {
                     |hand, community| equity.equity(hand, community, &index).to_vec(),
                 );
 
-                let mut db = Box::new(U::new(texture::BINS));
-                db.reserve(10);
-                for (i, centroid) in centroids.iter().enumerate() {
-                    db.store(i as u64, centroid);
+                Self {
+                    db: make_db(&centroids, texture::BINS),
+                    centroids,
+                    equity,
+                    index,
                 }
+            }
+            FlopGroupVersions::V2 => {
+                let centroids = kmeans(
+                    10000,
+                    20,
+                    texture::BINS,
+                    Street::Flop,
+                    rng,
+                    |hand, community| equity.equity(hand, community, &index).to_vec(),
+                );
 
                 Self {
-                    db,
+                    db: make_db(&centroids, texture::BINS),
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
+            FlopGroupVersions::Elbow => {
+                for groups in [1, 2, 4, 8, 16, 32, 64, 128] {
+                    println!("info flop elbow {}", groups);
+                    _ = kmeans(
+                        10000,
+                        groups,
+                        texture::BINS,
+                        Street::Flop,
+                        rng,
+                        |hand, community| equity.equity(hand, community, &index).to_vec(),
+                    );
+                }
+
+                let groups = 1;
+                let centroids = kmeans(
+                    10000,
+                    groups,
+                    texture::BINS,
+                    Street::Flop,
+                    rng,
+                    |hand, community| equity.equity(hand, community, &index).to_vec(),
+                );
+
+                Self {
+                    db: make_db(&centroids, texture::BINS),
                     centroids,
                     equity,
                     index,
@@ -272,23 +389,33 @@ impl Versioned<FlopGroupVersions> for FlopGroup {
         postcard::to_allocvec(&data).unwrap()
     }
 
-    fn from_bytes(_version: &FlopGroupVersions, path: &str, bytes: &[u8]) -> Self {
+    fn from_bytes(version: &FlopGroupVersions, path: &str, bytes: &[u8]) -> Self {
         let data: EquityData = postcard::from_bytes(bytes).unwrap();
-
-        let mut db = Box::new(U::new(texture::BINS));
-        db.reserve(10);
-        for (i, centroid) in data.centroids.iter().enumerate() {
-            db.store(i as u64, centroid);
-        }
-
         let equity: texture::Flop = try_load(&texture::TextureFlopVersions::V1, path);
         let index = SuitIndex::new(2, 3);
 
-        Self {
-            db,
-            centroids: data.centroids,
-            equity,
-            index,
+        match *version {
+            FlopGroupVersions::V1 => Self {
+                db: make_db(&data.centroids, texture::BINS),
+                centroids: data.centroids,
+                equity,
+                index,
+            },
+            FlopGroupVersions::V2 => Self {
+                db: make_db(&data.centroids, texture::BINS),
+                centroids: data.centroids,
+                equity,
+                index,
+            },
+            FlopGroupVersions::Elbow => unimplemented!(),
+        }
+    }
+
+    fn should_cache(version: &FlopGroupVersions) -> bool {
+        match *version {
+            FlopGroupVersions::V1 => true,
+            FlopGroupVersions::V2 => true,
+            FlopGroupVersions::Elbow => false,
         }
     }
 }
@@ -316,15 +443,15 @@ pub struct TurnGroup {
     index: SuitIndex,
 }
 
-versions!(TurnGroupVersions, V1);
+versions!(TurnGroupVersions, V1, V2, Elbow);
 
 impl Versioned<TurnGroupVersions> for TurnGroup {
     fn build(version: &TurnGroupVersions, path: &str) -> Self {
+        let rng = &mut rand::rng();
+        let equity: texture::Turn = try_load(&texture::TextureTurnVersions::V1, path);
+        let index = SuitIndex::new(2, 4);
         match version {
             TurnGroupVersions::V1 => {
-                let rng = &mut rand::rng();
-                let equity: texture::Turn = try_load(&texture::TextureTurnVersions::V1, path);
-                let index = SuitIndex::new(2, 4);
                 let centroids = kmeans(
                     10000,
                     8,
@@ -334,14 +461,55 @@ impl Versioned<TurnGroupVersions> for TurnGroup {
                     |hand, community| equity.equity(hand, community, &index).to_vec(),
                 );
 
-                let mut db = Box::new(U::new(texture::BINS));
-                db.reserve(8);
-                for (i, centroid) in centroids.iter().enumerate() {
-                    db.store(i as u64, centroid);
+                Self {
+                    db: make_db(&centroids, texture::BINS),
+                    centroids,
+                    equity,
+                    index,
                 }
+            }
+            TurnGroupVersions::V2 => {
+                let centroids = kmeans(
+                    10000,
+                    8,
+                    texture::BINS,
+                    Street::Turn,
+                    rng,
+                    |hand, community| equity.equity(hand, community, &index).to_vec(),
+                );
 
                 Self {
-                    db,
+                    db: make_db(&centroids, texture::BINS),
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
+            TurnGroupVersions::Elbow => {
+                for groups in [1, 2, 4, 8, 16, 32, 64, 128] {
+                    println!("info turn elbow {}", groups);
+                    _ = kmeans(
+                        10000,
+                        groups,
+                        texture::BINS,
+                        Street::Turn,
+                        rng,
+                        |hand, community| equity.equity(hand, community, &index).to_vec(),
+                    );
+                }
+
+                let groups = 1;
+                let centroids = kmeans(
+                    10000,
+                    groups,
+                    texture::BINS,
+                    Street::Turn,
+                    rng,
+                    |hand, community| equity.equity(hand, community, &index).to_vec(),
+                );
+
+                Self {
+                    db: make_db(&centroids, texture::BINS),
                     centroids,
                     equity,
                     index,
@@ -357,23 +525,33 @@ impl Versioned<TurnGroupVersions> for TurnGroup {
         postcard::to_allocvec(&data).unwrap()
     }
 
-    fn from_bytes(_version: &TurnGroupVersions, path: &str, bytes: &[u8]) -> Self {
+    fn from_bytes(version: &TurnGroupVersions, path: &str, bytes: &[u8]) -> Self {
         let data: EquityData = postcard::from_bytes(bytes).unwrap();
-
-        let mut db = Box::new(U::new(texture::BINS));
-        db.reserve(8);
-        for (i, centroid) in data.centroids.iter().enumerate() {
-            db.store(i as u64, centroid);
-        }
-
         let equity: texture::Turn = try_load(&texture::TextureTurnVersions::V1, path);
         let index = SuitIndex::new(2, 4);
 
-        Self {
-            db,
-            centroids: data.centroids,
-            equity,
-            index,
+        match *version {
+            TurnGroupVersions::V1 => Self {
+                db: make_db(&data.centroids, texture::BINS),
+                centroids: data.centroids,
+                equity,
+                index,
+            },
+            TurnGroupVersions::V2 => Self {
+                db: make_db(&data.centroids, texture::BINS),
+                centroids: data.centroids,
+                equity,
+                index,
+            },
+            TurnGroupVersions::Elbow => unimplemented!(),
+        }
+    }
+
+    fn should_cache(version: &TurnGroupVersions) -> bool {
+        match *version {
+            TurnGroupVersions::V1 => true,
+            TurnGroupVersions::V2 => true,
+            TurnGroupVersions::Elbow => false,
         }
     }
 }
@@ -402,27 +580,54 @@ pub struct RiverGroup {
     index: SuitIndex,
 }
 
-versions!(RiverGroupVersions, V1);
+versions!(RiverGroupVersions, V1, V2, Elbow);
 
 impl Versioned<RiverGroupVersions> for RiverGroup {
     fn build(version: &RiverGroupVersions, path: &str) -> Self {
-        match version {
+        let rng = &mut rand::rng();
+        let equity: texture::River = try_load(&texture::TextureRiverVersions::V1, path);
+        let index = SuitIndex::new(2, 5);
+
+        match *version {
             RiverGroupVersions::V1 => {
-                let rng = &mut rand::rng();
-                let equity: texture::River = try_load(&texture::TextureRiverVersions::V1, path);
-                let index = SuitIndex::new(2, 5);
                 let centroids = kmeans(10000, 8, 1, Street::River, rng, |hand, community| {
                     vec![equity.equity(hand, community, &index)]
                 });
 
-                let mut db = Box::new(U::new(1));
-                db.reserve(8);
-                for (i, centroid) in centroids.iter().enumerate() {
-                    db.store(i as u64, centroid);
+                Self {
+                    db: make_db(&centroids, 1),
+                    centroids,
+                    equity,
+                    index,
                 }
+            }
+            RiverGroupVersions::V2 => {
+                let centroids = kmeans(10000, 8, 1, Street::River, rng, |hand, community| {
+                    vec![equity.equity(hand, community, &index)]
+                });
 
                 Self {
-                    db,
+                    db: make_db(&centroids, 1),
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
+            RiverGroupVersions::Elbow => {
+                for groups in [1, 2, 4, 8, 16, 32, 64, 128] {
+                    println!("info river elbow {}", groups);
+                    _ = kmeans(10000, groups, 1, Street::River, rng, |hand, community| {
+                        vec![equity.equity(hand, community, &index)]
+                    });
+                }
+
+                let groups = 1;
+                let centroids = kmeans(10000, groups, 1, Street::River, rng, |hand, community| {
+                    vec![equity.equity(hand, community, &index)]
+                });
+
+                Self {
+                    db: make_db(&centroids, 1),
                     centroids,
                     equity,
                     index,
@@ -438,23 +643,25 @@ impl Versioned<RiverGroupVersions> for RiverGroup {
         postcard::to_allocvec(&data).unwrap()
     }
 
-    fn from_bytes(_version: &RiverGroupVersions, path: &str, bytes: &[u8]) -> Self {
+    fn from_bytes(version: &RiverGroupVersions, path: &str, bytes: &[u8]) -> Self {
         let data: EquityData = postcard::from_bytes(bytes).unwrap();
-
-        let mut db = Box::new(U::new(1));
-        db.reserve(8);
-        for (i, centroid) in data.centroids.iter().enumerate() {
-            db.store(i as u64, centroid);
-        }
-
         let equity: texture::River = try_load(&texture::TextureRiverVersions::V1, path);
         let index = SuitIndex::new(2, 5);
 
-        Self {
-            db,
-            centroids: data.centroids,
-            equity,
-            index,
+        match *version {
+            RiverGroupVersions::V1 => Self {
+                db: make_db(&data.centroids, 1),
+                centroids: data.centroids,
+                equity,
+                index,
+            },
+            RiverGroupVersions::V2 => Self {
+                db: make_db(&data.centroids, 1),
+                centroids: data.centroids,
+                equity,
+                index,
+            },
+            RiverGroupVersions::Elbow => unimplemented!(),
         }
     }
 }

@@ -27,6 +27,10 @@ pub trait Versioned<V: ToString> {
     fn build(version: &V, path: &str) -> Self;
     fn to_bytes(&self) -> Vec<u8>;
     fn from_bytes(version: &V, path: &str, bytes: &[u8]) -> Self;
+
+    fn should_cache(_version: &V) -> bool {
+        true
+    }
 }
 
 fn get_path<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> PathBuf {
@@ -35,16 +39,19 @@ fn get_path<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> PathBuf {
 
 pub fn try_load<V: ToString, T: Versioned<V>>(version: &V, path: &str) -> T {
     let direct_path = get_path::<V, T>(&version, path);
-    if let Ok(bytes) = fs::read(&direct_path) {
+    let should_cache = T::should_cache(version);
+    if should_cache && let Ok(bytes) = fs::read(&direct_path) {
         return T::from_bytes(version, path, &bytes);
     }
 
-    let t = T::build(&version, &path);
-    if let Some(parent) = direct_path.parent() {
-        println!("info creating {:?}", parent);
+    if should_cache && let Some(parent) = direct_path.parent() {
+        println!("info ver creating {:?} {}", parent, version.to_string());
         fs::create_dir_all(parent).unwrap();
     }
-    fs::write(&direct_path, t.to_bytes()).unwrap();
+    let t = T::build(&version, &path);
+    if should_cache {
+        fs::write(&direct_path, t.to_bytes()).unwrap();
+    }
     t
 }
 

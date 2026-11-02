@@ -50,19 +50,19 @@ pub fn create_groups(path: &str) -> [Box<dyn Group>; Street::COUNT] {
     Street::ALL.map(|street| -> Box<dyn Group> {
         match street {
             Street::Preflop => Box::new(try_load::<PreflopGroupVersions, PreflopGroup>(
-                &PreflopGroupVersions::V1,
+                &PreflopGroupVersions::V2,
                 path,
             )),
             Street::Flop => Box::new(try_load::<FlopGroupVersions, FlopGroup>(
-                &FlopGroupVersions::V1,
+                &FlopGroupVersions::V2,
                 path,
             )),
             Street::Turn => Box::new(try_load::<TurnGroupVersions, TurnGroup>(
-                &TurnGroupVersions::V1,
+                &TurnGroupVersions::V2,
                 path,
             )),
             Street::River => Box::new(try_load::<RiverGroupVersions, RiverGroup>(
-                &RiverGroupVersions::V1,
+                &RiverGroupVersions::Elbow,
                 path,
             )),
         }

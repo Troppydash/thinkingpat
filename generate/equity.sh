@@ -1,1 +1,1 @@
-cargo run -r -- "group equity ./data 100"
+cargo run -r -- "group equity ./data 10"
