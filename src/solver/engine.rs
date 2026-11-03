@@ -7,7 +7,10 @@ use std::{
 
 use arrayvec::ArrayVec;
 use fxhash::FxHashMap;
-use rand::{Rng, RngExt};
+use rand::{
+    Rng, RngExt,
+    distr::{Distribution, weighted::WeightedIndex},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -62,7 +65,7 @@ pub fn create_groups(path: &str) -> [Box<dyn Group>; Street::COUNT] {
                 path,
             )),
             Street::River => Box::new(try_load::<RiverGroupVersions, RiverGroup>(
-                &RiverGroupVersions::Elbow,
+                &RiverGroupVersions::V2,
                 path,
             )),
         }
@@ -217,6 +220,32 @@ impl Solver {
         strategy
     }
 
+    fn prefetch(&self, child_node: Option<usize>, new_board: &Board, board_group: &BoardGroups) {
+        if let Some(child_node) = child_node {
+            let child_group = board_group[new_board.stm() as usize][new_board.street() as usize];
+            #[cfg(target_arch = "x86_64")]
+            {
+                unsafe {
+                    use std::arch::x86_64::{_MM_HINT_ET0, _mm_prefetch};
+                    _mm_prefetch(
+                        self.nodes[child_node].policy.as_ptr().add(child_group) as *const i8,
+                        _MM_HINT_ET0,
+                    );
+                }
+            }
+
+            #[cfg(target_arch = "aarch64")]
+            {
+                unsafe {
+                    use core::arch::aarch64::{_PREFETCH_LOCALITY0, _PREFETCH_WRITE, _prefetch};
+                    _prefetch::<_PREFETCH_WRITE, _PREFETCH_LOCALITY0>(
+                        self.nodes[child_node].policy.as_ptr().add(child_group) as *const i8,
+                    );
+                }
+            }
+        }
+    }
+
     fn cfr(
         &mut self,
         reach_prob: &[f64; Player::COUNT],
@@ -247,39 +276,7 @@ impl Solver {
             new_board.play(*action);
 
             let child_node = self.nodes[node].children[i];
-
-            // prefetch
-            #[cfg(target_arch = "x86_64")]
-            {
-                if let Some(child_node) = child_node {
-                    let child_group =
-                        board_group[new_board.stm() as usize][new_board.street() as usize];
-                    unsafe {
-                        use std::arch::x86_64::{_MM_HINT_ET0, _mm_prefetch};
-                        _mm_prefetch(
-                            self.nodes[child_node].policy.as_ptr().add(child_group) as *const i8,
-                            _MM_HINT_ET0,
-                        );
-                    }
-                }
-            }
-
-            #[cfg(target_arch = "aarch64")]
-            {
-                if let Some(child_node) = child_node {
-                    let child_group =
-                        board_group[new_board.stm() as usize][new_board.street() as usize];
-                    unsafe {
-                        use core::arch::aarch64::{
-                            _PREFETCH_LOCALITY0, _PREFETCH_WRITE, _prefetch,
-                        };
-                        _prefetch::<_PREFETCH_WRITE, _PREFETCH_LOCALITY0>(
-                            self.nodes[child_node].policy.as_ptr().add(child_group) as *const i8,
-                        );
-                    }
-                }
-            }
-
+            self.prefetch(child_node, &new_board, board_group);
             new_boards.push(new_board);
         }
 
@@ -316,36 +313,38 @@ impl Solver {
             data.regret_sum[i] = (data.regret_sum[i]
                 + (opp_reach_prob * (counterfactual_value[i] - value)) as f32)
                 .max(0.0);
-            data.strategy_sum[i] += (reach_prob[board.stm() as usize] * strategy[i] as f64) as f32;
+
+            let t = self.iters as f64;
+            data.strategy_sum[i] +=
+                (t * reach_prob[board.stm() as usize] * strategy[i] as f64) as f32;
         }
 
         return value;
     }
 
-    /* fn mc_cfr(
+    fn mc_cfr(
         &mut self,
         responder: Player,
         board: &Board,
-        history: &mut ArrayVec<Action, MAX_ACTION_LENGTH>,
+        node: Option<usize>,
         board_group: &BoardGroups,
         rng: &mut impl Rng,
     ) -> f64 {
         // terminal
+        // TODO: we actually don't need board
         if let Outcome::Winnings(winnings) = board.outcome() {
             return winnings[responder as usize] as f64;
         }
 
-        let infoset = Infoset::new(
-            board.street(),
-            board_group[board.stm() as usize][board.street() as usize],
-            &history,
-        );
+        let node = node.unwrap();
 
         let actions = board.get_actions();
-        let strategy = self.regret_matching(&infoset, actions.len());
+        let group = board_group[board.stm() as usize][board.street() as usize];
+        let data = self.nodes[node].policy[group];
+
+        let strategy = self.regret_matching(&data, actions.len(), rng);
 
         let value: f64;
-
         if board.stm() != responder {
             let dist = WeightedIndex::new(&strategy).unwrap();
             let sampled = dist.sample(rng);
@@ -354,13 +353,13 @@ impl Solver {
             let mut new_board = board.clone();
             new_board.play(action);
 
-            history.push(action);
-            value = self.mc_cfr(responder, &new_board, history, board_group, rng);
-            history.pop();
+            let child_node = self.nodes[node].children[sampled];
+            value = self.mc_cfr(responder, &new_board, child_node, board_group, rng);
 
-            let data = self.infosets.get_mut(&infoset).unwrap();
+            let t = self.iters as f64;
+            let data = &mut self.nodes[node].policy[group];
             for i in 0..actions.len() {
-                data.strategy_sum[i] += strategy[i] as f32;
+                data.strategy_sum[i] += (t * strategy[i] as f64) as f32;
             }
         } else {
             let mut counterfactual_value = [0.0_f64; MAX_ACTIONS];
@@ -368,11 +367,11 @@ impl Solver {
                 let mut new_board = board.clone();
                 new_board.play(*action);
 
-                history.push(*action);
+                let child_node = self.nodes[node].children[i];
+                self.prefetch(child_node, &new_board, board_group);
 
                 counterfactual_value[i] =
-                    self.mc_cfr(responder, &new_board, history, board_group, rng);
-                history.pop();
+                    self.mc_cfr(responder, &new_board, child_node, board_group, rng);
             }
 
             value = counterfactual_value
@@ -381,16 +380,16 @@ impl Solver {
                 .map(|(i, v)| strategy[i] as f64 * v)
                 .sum();
 
+            // TODO: regret prune
             // regret sum update
-            let data = self.infosets.get_mut(&infoset).unwrap();
+            let data = &mut self.nodes[node].policy[group];
             for i in 0..actions.len() {
-                data.regret_sum[i] =
-                    (data.regret_sum[i] + (counterfactual_value[i] - value) as f32);
+                data.regret_sum[i] = data.regret_sum[i] + (counterfactual_value[i] - value) as f32;
             }
         }
 
         return value;
-    } */
+    }
 
     fn best_response_evaluate(
         &mut self,
@@ -528,6 +527,12 @@ impl Solver {
             return;
         }
 
+        const ITER_PRINT: usize = 20_000;
+        // aim for per 2-3 min
+        const ITER_SAVE: usize = 5_000_000;
+        // aim for per min
+        const ITER_EXPLOIT: usize = 2_000_000;
+
         std::fs::create_dir_all(filename).unwrap();
         println!(
             "info cfr estimate_memory {}mb",
@@ -544,27 +549,29 @@ impl Solver {
         let target = self.iters + iters;
         let start = Instant::now();
         while self.iters < target {
-            if self.iters % 5000 == 0 {
+            self.iters += 1;
+
+            if self.iters % ITER_PRINT == 0 {
                 println!(
                     "info cfr iter {} iter/s {}",
                     self.iters,
                     self.iters as u64 * 1000 / (start.elapsed().as_millis() as u64).max(1)
                 );
             }
-            let board = Board::new();
-            let board_groups = self.make_board_group(&board);
-            let reach_prob = [1.0; Player::COUNT];
-            self.cfr(&reach_prob, &board, Some(0), &board_groups, &mut rng);
-            // for player in Player::ALL {
-            //     self.mc_cfr(player, &board, &mut history, &board_groups, &mut rng);
-            // }
 
-            self.iters += 1;
+            // let reach_prob = [1.0; Player::COUNT];
+            // self.cfr(&reach_prob, &board, Some(0), &board_groups, &mut rng);
 
-            if self.iters % 200000 == 0 || self.iters == target {
+            for player in Player::ALL {
+                let board = Board::new();
+                let board_groups = self.make_board_group(&board);
+                self.mc_cfr(player, &board, Some(0), &board_groups, &mut rng);
+            }
+
+            if self.iters % ITER_SAVE == 0 || self.iters == target {
                 self.save(&format!("{filename}/iter_{}.bin", self.iters));
             }
-            if self.iters % 200000 == 0 {
+            if self.iters % ITER_EXPLOIT == 0 {
                 println!(
                     "info cfr exploitability {:.5} sb",
                     self.exploitability(20000)
@@ -576,43 +583,49 @@ impl Solver {
     const CHECKPOINT_BUFFER_SIZE: usize = 64 * 1024;
 
     fn save(&self, filename: &str) {
-        let mut writer = BufWriter::with_capacity(
+        let writer = BufWriter::with_capacity(
             Self::CHECKPOINT_BUFFER_SIZE,
             File::create(filename).unwrap(),
         );
-        writer
-            .write_all(&(self.nodes.len() as u64).to_le_bytes())
-            .unwrap();
+        Self::write_checkpoint(&self.nodes, writer).unwrap();
+    }
 
-        for data in &self.nodes {
-            let raw = postcard::to_allocvec(data).unwrap();
-            writer.write_all(&(raw.len() as u64).to_le_bytes()).unwrap();
-            writer.write_all(&raw).unwrap();
+    fn write_checkpoint(nodes: &[BettingNode], writer: impl Write) -> io::Result<()> {
+        let mut encoder = zstd::stream::write::Encoder::new(writer, 7)?;
+        encoder.write_all(&(nodes.len() as u64).to_le_bytes())?;
+
+        for data in nodes {
+            let raw = postcard::to_allocvec(data)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            encoder.write_all(&(raw.len() as u64).to_le_bytes())?;
+            encoder.write_all(&raw)?;
         }
 
-        writer.flush().unwrap()
+        encoder.finish()?.flush()
     }
 
     pub fn load(filename: &str, path: &str) -> Self {
-        let mut reader =
+        let reader =
             BufReader::with_capacity(Self::CHECKPOINT_BUFFER_SIZE, File::open(filename).unwrap());
-
         let mut solver = Self::new(path);
+        solver.nodes = Self::read_checkpoint(reader);
+        solver
+    }
 
-        let count = usize::try_from(read_u64(&mut reader).unwrap()).unwrap();
-        solver.nodes.reserve_exact(count);
-
+    fn read_checkpoint(reader: impl Read) -> Vec<BettingNode> {
+        let mut reader = zstd::stream::read::Decoder::new(reader).unwrap();
+        let count = read_u64(&mut reader).unwrap() as usize;
+        let mut nodes = Vec::with_capacity(count);
         let mut bytes = vec![];
+
         for _ in 0..count {
-            let size = usize::try_from(read_u64(&mut reader).unwrap()).unwrap();
+            let size = read_u64(&mut reader).unwrap() as usize;
             bytes.resize(size, 0);
             reader.read_exact(&mut bytes).unwrap();
-
-            let node = postcard::from_bytes(&bytes).unwrap();
-            solver.nodes.push(node);
+            nodes.push(postcard::from_bytes(&bytes).unwrap());
         }
 
-        solver
+        nodes
     }
 
     pub fn lookup(&mut self, board: &Board, history: &[Action]) -> Actions {

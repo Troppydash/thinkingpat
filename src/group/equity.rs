@@ -115,6 +115,7 @@ fn kmeans(
         for (centroid, close_points) in new_centroids.iter().enumerate() {
             if close_points.is_empty() {
                 // this can be bad
+                println!("Hi");
                 continue;
             }
 
@@ -126,7 +127,7 @@ fn kmeans(
                 let middle = values.len() / 2;
                 values.select_nth_unstable_by(middle, f32::total_cmp);
 
-                if (centroid[k] - values[middle]).abs() < 0.0001 {
+                if (centroid[k] - values[middle]).abs() > 0.0001 {
                     changed = true;
                 }
 
@@ -192,7 +193,7 @@ impl Versioned<PreflopGroupVersions> for PreflopGroup {
                 }
             }
             PreflopGroupVersions::V2 => {
-                let groups = 32;
+                let groups = 20;
                 let centroids = kmeans(
                     10000,
                     groups,
@@ -335,7 +336,7 @@ impl Versioned<FlopGroupVersions> for FlopGroup {
             FlopGroupVersions::V2 => {
                 let centroids = kmeans(
                     10000,
-                    20,
+                    30,
                     texture::BINS,
                     Street::Flop,
                     rng,
@@ -471,7 +472,7 @@ impl Versioned<TurnGroupVersions> for TurnGroup {
             TurnGroupVersions::V2 => {
                 let centroids = kmeans(
                     10000,
-                    8,
+                    30,
                     texture::BINS,
                     Street::Turn,
                     rng,
@@ -602,7 +603,7 @@ impl Versioned<RiverGroupVersions> for RiverGroup {
                 }
             }
             RiverGroupVersions::V2 => {
-                let centroids = kmeans(10000, 8, 1, Street::River, rng, |hand, community| {
+                let centroids = kmeans(10000, 10, 1, Street::River, rng, |hand, community| {
                     vec![equity.equity(hand, community, &index)]
                 });
 
@@ -662,6 +663,14 @@ impl Versioned<RiverGroupVersions> for RiverGroup {
                 index,
             },
             RiverGroupVersions::Elbow => unimplemented!(),
+        }
+    }
+
+    fn should_cache(version: &RiverGroupVersions) -> bool {
+        match *version {
+            RiverGroupVersions::V1 => true,
+            RiverGroupVersions::V2 => true,
+            RiverGroupVersions::Elbow => false,
         }
     }
 }
