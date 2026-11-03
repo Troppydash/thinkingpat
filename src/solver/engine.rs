@@ -22,7 +22,8 @@ use crate::{
         },
         group::Group,
     },
-    ver::try_load,
+    ver::{Versioned, try_load},
+    versions,
 };
 
 pub const MAX_ACTIONS: usize = 3;
@@ -48,28 +49,77 @@ fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
     Ok(u64::from_le_bytes(bytes))
 }
 
-// TODO: make this a parameter instead
-pub fn create_groups(path: &str) -> [Box<dyn Group>; Street::COUNT] {
-    Street::ALL.map(|street| -> Box<dyn Group> {
-        match street {
-            Street::Preflop => Box::new(try_load::<PreflopGroupVersions, PreflopGroup>(
-                &PreflopGroupVersions::V2,
-                path,
-            )),
-            Street::Flop => Box::new(try_load::<FlopGroupVersions, FlopGroup>(
-                &FlopGroupVersions::V2,
-                path,
-            )),
-            Street::Turn => Box::new(try_load::<TurnGroupVersions, TurnGroup>(
-                &TurnGroupVersions::V2,
-                path,
-            )),
-            Street::River => Box::new(try_load::<RiverGroupVersions, RiverGroup>(
-                &RiverGroupVersions::V2,
-                path,
-            )),
+pub struct EngineGroups {
+    pub groups: [Box<dyn Group>; Street::COUNT],
+}
+
+versions!(EngineGroupsVersions, V1, V2);
+
+impl Versioned<EngineGroupsVersions> for EngineGroups {
+    fn build(version: &EngineGroupsVersions, path: &str) -> Self {
+        match *version {
+            EngineGroupsVersions::V1 => Self {
+                groups: Street::ALL.map(|street| -> Box<dyn Group> {
+                    match street {
+                        Street::Preflop => {
+                            Box::new(try_load::<PreflopGroupVersions, PreflopGroup>(
+                                &PreflopGroupVersions::V1,
+                                path,
+                            ))
+                        }
+                        Street::Flop => Box::new(try_load::<FlopGroupVersions, FlopGroup>(
+                            &FlopGroupVersions::V1,
+                            path,
+                        )),
+                        Street::Turn => Box::new(try_load::<TurnGroupVersions, TurnGroup>(
+                            &TurnGroupVersions::V1,
+                            path,
+                        )),
+                        Street::River => Box::new(try_load::<RiverGroupVersions, RiverGroup>(
+                            &RiverGroupVersions::V1,
+                            path,
+                        )),
+                    }
+                }),
+            },
+            EngineGroupsVersions::V2 => Self {
+                groups: Street::ALL.map(|street| -> Box<dyn Group> {
+                    match street {
+                        Street::Preflop => {
+                            Box::new(try_load::<PreflopGroupVersions, PreflopGroup>(
+                                &PreflopGroupVersions::V2,
+                                path,
+                            ))
+                        }
+                        Street::Flop => Box::new(try_load::<FlopGroupVersions, FlopGroup>(
+                            &FlopGroupVersions::V2,
+                            path,
+                        )),
+                        Street::Turn => Box::new(try_load::<TurnGroupVersions, TurnGroup>(
+                            &TurnGroupVersions::V2,
+                            path,
+                        )),
+                        Street::River => Box::new(try_load::<RiverGroupVersions, RiverGroup>(
+                            &RiverGroupVersions::V2,
+                            path,
+                        )),
+                    }
+                }),
+            },
         }
-    })
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        unimplemented!()
+    }
+
+    fn from_bytes(_version: &EngineGroupsVersions, _path: &str, _bytes: &[u8]) -> Self {
+        unimplemented!()
+    }
+
+    fn should_cache(_version: &EngineGroupsVersions) -> bool {
+        false
+    }
 }
 
 /// Note that the history is encapsulated in the children *pointers
@@ -89,10 +139,10 @@ pub struct Solver {
 }
 
 impl Solver {
-    pub fn new(path: &str) -> Self {
+    pub fn new(groups: EngineGroups) -> Self {
         Self {
             nodes: vec![],
-            street_groups: create_groups(path),
+            street_groups: groups.groups,
             iters: 0,
         }
     }
@@ -604,10 +654,10 @@ impl Solver {
         encoder.finish()?.flush()
     }
 
-    pub fn load(filename: &str, path: &str) -> Self {
+    pub fn load(filename: &str, groups: EngineGroups) -> Self {
         let reader =
             BufReader::with_capacity(Self::CHECKPOINT_BUFFER_SIZE, File::open(filename).unwrap());
-        let mut solver = Self::new(path);
+        let mut solver = Self::new(groups);
         solver.nodes = Self::read_checkpoint(reader);
         solver
     }

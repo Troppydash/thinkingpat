@@ -9,7 +9,8 @@ use crate::{
     bot::{cfr::Cfr, random::Random},
     game::{board::Street, card::CardSet},
     group::equity::to_pdf,
-    solver::engine::{Solver, create_groups},
+    solver::engine::{EngineGroups, EngineGroupsVersions, Solver},
+    ver::try_load,
 };
 
 mod arena;
@@ -22,7 +23,8 @@ mod solver;
 mod ver;
 
 fn visualize_groups(samples: usize, path: &str) {
-    let groups = create_groups(path);
+    let groups =
+        try_load::<EngineGroupsVersions, EngineGroups>(&EngineGroupsVersions::V2, path).groups;
     let rng = &mut rand::rng();
 
     for street in Street::ALL {
@@ -49,21 +51,38 @@ fn visualize_groups(samples: usize, path: &str) {
 }
 
 fn cfr_solve(filename: &str, path: &str, iters: usize) {
-    let mut solver = Solver::new(path);
+    let groups = try_load(&EngineGroupsVersions::V2, path);
+    let mut solver = Solver::new(groups);
     solver.solve(filename, iters);
 }
 
 fn test_random(filename: &str, path: &str, iters: usize) {
-    let solver = Solver::load(filename, path);
+    let groups = try_load(&EngineGroupsVersions::V2, path);
+    let solver = Solver::load(filename, groups);
     let cfr = Cfr::new(solver);
     let mut arena = Arena::new([Box::new(cfr), Box::new(Random)]);
     arena.play(iters);
 }
 
 fn test_equity(filename: &str, path: &str, iters: usize) {
-    let solver = Solver::load(filename, path);
+    let groups = try_load(&EngineGroupsVersions::V2, path);
+    let solver = Solver::load(filename, groups);
     let cfr = Cfr::new(solver);
     let mut arena = Arena::new([Box::new(cfr), Box::new(bot::equity::Equity)]);
+    arena.play(iters);
+}
+
+fn test_versions(filename_a: &str, filename_b: &str, path: &str, iters: usize) {
+    let groups_a = try_load(&EngineGroupsVersions::V2, path);
+
+    let solver_a = Solver::load(filename_a, groups_a);
+    let cfr_a = Cfr::new(solver_a);
+
+    let groups_b = try_load(&EngineGroupsVersions::V1, path);
+    let solver_b = Solver::load(filename_b, groups_b);
+    let cfr_b = Cfr::new(solver_b);
+
+    let mut arena = Arena::new([Box::new(cfr_a), Box::new(cfr_b)]);
     arena.play(iters);
 }
 
@@ -101,23 +120,32 @@ fn ui(args: Vec<String>) {
                     println!("warn unknown cfr command {}", parts[0]);
                 }
             },
-            "play" => {
-                let path = parts[1];
-                let filename = parts[2];
-                let iters: usize = parts[3].parse().unwrap();
+            "play" => match parts[0] {
+                "random" => {
+                    let path = parts[1];
+                    let filename = parts[2];
+                    let iters: usize = parts[3].parse().unwrap();
 
-                match parts[0] {
-                    "random" => {
-                        test_random(filename, path, iters);
-                    }
-                    "equity" => {
-                        test_equity(filename, path, iters);
-                    }
-                    _ => {
-                        panic!("");
-                    }
+                    test_random(filename, path, iters);
                 }
-            }
+                "equity" => {
+                    let path = parts[1];
+                    let filename = parts[2];
+                    let iters: usize = parts[3].parse().unwrap();
+
+                    test_equity(filename, path, iters);
+                }
+                "versions" => {
+                    let path = parts[1];
+                    let filename_a = parts[2];
+                    let filename_b = parts[3];
+                    let iters: usize = parts[4].parse().unwrap();
+                    test_versions(filename_a, filename_b, path, iters);
+                }
+                _ => {
+                    panic!("");
+                }
+            },
             _ => {
                 println!("warn unknown command {}", command);
             }

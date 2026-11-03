@@ -10,5 +10,6 @@ https://www.desmos.com/calculator/z9bo4weu63
 11_02
 - groups: 20, 30, 30, 10
 - 6GB mem
-- mc_cfr
-- 90m iters, around 30m-1h, 0.24 ish ev against equity
+- mc_cfr, T scaled average
+- 90m iters, around 30m-1h
+- 0.30985 +- 0.07289 against equity
