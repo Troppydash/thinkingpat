@@ -5,11 +5,13 @@ https://www.desmos.com/calculator/z9bo4weu63
 11_01
 - groups: 10, 10, 8, 8
 - 2GB mem
+- exploitability /shrug
 - at 7.2m iters, 0.15 ish ev against equity
 
-11_02
+11_03
 - groups: 20, 30, 30, 10
 - 6GB mem
 - mc_cfr, T scaled average
 - 90m iters, around 30m-1h
+- exploitability 3.49986 sb
 - 0.30985 +- 0.07289 against equity

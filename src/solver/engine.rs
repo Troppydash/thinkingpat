@@ -30,6 +30,7 @@ pub const MAX_ACTIONS: usize = 3;
 type Actions = [f32; MAX_ACTIONS];
 type Belief = Vec<(Board, f64)>;
 type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
+type Response = FxHashMap<(usize, usize), usize>;
 
 #[repr(C)]
 #[derive(Default, Clone, Copy, Serialize, Deserialize)]
@@ -441,15 +442,14 @@ impl Solver {
         return value;
     }
 
-    fn best_response_evaluate(
-        &mut self,
+    fn build_response(
+        &self,
         responder: Player,
-        // weights are all !responder multiplied
         belief: Belief,
         node: Option<usize>,
         board_groups: &FxHashMap<CardState, BoardGroups>,
+        response: &mut Response,
     ) -> f64 {
-        // all the boards are synced
         let board = &belief[0].0;
         if let Outcome::Winnings(_) = board.outcome() {
             return belief
@@ -475,7 +475,6 @@ impl Solver {
             "best-response deals must share a public betting history"
         );
 
-        // group boards by infosets
         let mut infosets: FxHashMap<usize, Belief> = FxHashMap::default();
         for (board, weight) in belief {
             let group = board_groups[&board.card_state_full()][board.stm() as usize]
@@ -488,11 +487,10 @@ impl Solver {
 
         if stm == responder {
             infosets
-                .into_values()
-                .map(|states| {
-                    assert!(!states.is_empty());
-
+                .into_iter()
+                .map(|(group, states)| {
                     let mut total = f64::NEG_INFINITY;
+                    let mut best = 0;
                     for (i, action) in actions.iter().enumerate() {
                         let children = states
                             .iter()
@@ -504,21 +502,25 @@ impl Solver {
                             .collect();
 
                         let child_node = self.nodes[node].children[i];
-                        let value = self.best_response_evaluate(
+                        let value = self.build_response(
                             responder,
                             children,
                             child_node,
                             board_groups,
+                            response,
                         );
 
-                        total = total.max(value);
+                        if value > total {
+                            total = value;
+                            best = i;
+                        }
                     }
 
+                    response.insert((node, group), best);
                     total
                 })
                 .sum()
         } else {
-            // non responder doesn't partition by infoset because that is private information
             let mut children: [Belief; MAX_ACTIONS] = [const { vec![] }; MAX_ACTIONS];
             for (group, states) in infosets {
                 let strategy =
@@ -536,40 +538,94 @@ impl Solver {
             }
 
             let mut total = 0.0;
-            for (i, (action, states)) in actions.iter().zip(children).enumerate() {
+            for (i, states) in children.into_iter().enumerate() {
                 if states.is_empty() {
                     continue;
                 }
                 let child_node = self.nodes[node].children[i];
-                total += self.best_response_evaluate(responder, states, child_node, board_groups);
+                total += self.build_response(responder, states, child_node, board_groups, response);
             }
             total
         }
     }
 
-    fn best_response(
-        &mut self,
+    fn response_value(
+        &self,
         responder: Player,
-        boards: &[Board],
-        board_groups: &FxHashMap<CardState, BoardGroups>,
+        mut board: Board,
+        board_groups: &BoardGroups,
+        response: &Response,
+        rng: &mut impl Rng,
     ) -> f64 {
-        let chance_weight = 1.0 / boards.len() as f64;
-        let belief = boards
-            .iter()
-            .map(|board| (board.clone(), chance_weight))
-            .collect();
-        self.best_response_evaluate(responder, belief, Some(0), board_groups)
+        let mut node = Some(0);
+        loop {
+            if let Outcome::Winnings(winnings) = board.outcome() {
+                return winnings[responder as usize] as f64;
+            }
+
+            let node_id = node.unwrap();
+            let actions = board.get_actions();
+            let group = board_groups[board.stm() as usize][board.street() as usize];
+            let best = if board.stm() == responder {
+                response.get(&(node_id, group))
+            } else {
+                None
+            };
+            let sampled = if let Some(&best) = best {
+                best
+            } else {
+                let strategy =
+                    self.average_strategy(&self.nodes[node_id].policy[group], actions.len());
+                let dist = WeightedIndex::new(&strategy[..actions.len()]).unwrap();
+                dist.sample(rng)
+            };
+
+            board.play(actions[sampled]);
+            node = self.nodes[node_id].children[sampled];
+        }
     }
 
-    fn exploitability(&mut self, iters: usize) -> f64 {
+    fn response_strength(&self, iters: usize) -> (f64, f64) {
         let boards: Vec<_> = (0..iters).map(|_| Board::new()).collect();
         let board_groups = self.make_board_groups(&boards);
+        let responses = Player::ALL.map(|responder| {
+            let mut response = Response::default();
+            let belief = boards
+                .iter()
+                .map(|board| (board.clone(), 1.0 / iters as f64))
+                .collect();
+            self.build_response(responder, belief, Some(0), &board_groups, &mut response);
+            response
+        });
 
-        Player::ALL
-            .into_iter()
-            .map(|p| self.best_response(p, &boards, &board_groups))
-            .sum::<f64>()
-            / 2.0
+        let mut rng = rand::rng();
+        let mut mean = 0.0;
+        let mut m2 = 0.0;
+        for iter in 0..iters {
+            let board = Board::new();
+            let board_groups = self.make_board_group(&board);
+            let value = Player::ALL
+                .into_iter()
+                .map(|responder| {
+                    self.response_value(
+                        responder,
+                        board.clone(),
+                        &board_groups,
+                        &responses[responder as usize],
+                        &mut rng,
+                    )
+                })
+                .sum::<f64>()
+                / 2.0;
+
+            let n = (iter + 1) as f64;
+            let delta = value - mean;
+            mean += delta / n;
+            m2 += delta * (value - mean);
+        }
+
+        let variance = m2 / (iters - 1).max(1) as f64;
+        (mean, 1.96 * (variance / iters as f64).sqrt())
     }
 
     pub fn solve(&mut self, filename: &str, iters: usize) {
@@ -581,7 +637,7 @@ impl Solver {
         // aim for per 2-3 min
         const ITER_SAVE: usize = 5_000_000;
         // aim for per min
-        const ITER_EXPLOIT: usize = 2_000_000;
+        const ITER_RESPONSE: usize = 2_000_000;
 
         std::fs::create_dir_all(filename).unwrap();
         println!(
@@ -621,11 +677,9 @@ impl Solver {
             if self.iters % ITER_SAVE == 0 || self.iters == target {
                 self.save(&format!("{filename}/iter_{}.bin", self.iters));
             }
-            if self.iters % ITER_EXPLOIT == 0 {
-                println!(
-                    "info cfr exploitability {:.5} sb",
-                    self.exploitability(20000)
-                );
+            if self.iters % ITER_RESPONSE == 0 {
+                let (mean, error) = self.response_strength(100000);
+                println!("info cfr response_strength {mean:.5} +- {error:.5} sb");
             }
         }
     }
