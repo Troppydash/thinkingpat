@@ -1,1 +1,1 @@
-cargo run -r -- "cfr solve ./data ./data/checkpoint/$1/ 100000000"
+cargo run -r -- "cfr solve ./data ./data/checkpoint/$1/"

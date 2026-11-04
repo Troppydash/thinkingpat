@@ -7,10 +7,7 @@ use std::{
 
 use arrayvec::ArrayVec;
 use fxhash::FxHashMap;
-use rand::{
-    Rng, RngExt,
-    distr::{Distribution, weighted::WeightedIndex},
-};
+use rand::{Rng, RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -27,6 +24,7 @@ use crate::{
 };
 
 pub const MAX_ACTIONS: usize = 3;
+const DISCOUNT_NODES_PER_PERIOD: u64 = 10_000_000;
 type Actions = [f32; MAX_ACTIONS];
 type Belief = Vec<(Board, f64)>;
 type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
@@ -38,6 +36,26 @@ struct InfosetData {
     // TODO: consider fixed point
     regret_sum: Actions,
     strategy_sum: Actions,
+    discount_period: u32,
+}
+
+impl InfosetData {
+    fn discount_to(&mut self, period: u32) {
+        let previous = self.discount_period.max(1);
+        debug_assert!(period >= previous);
+        if previous != period {
+            // Product of k/(k+1) over skipped boundaries telescopes.
+            let factor = previous as f64 / period as f64;
+            for x in self
+                .regret_sum
+                .iter_mut()
+                .chain(self.strategy_sum.iter_mut())
+            {
+                *x = (*x as f64 * factor) as f32;
+            }
+        }
+        self.discount_period = period;
+    }
 }
 
 fn adjust_sign(x: f64, stm: Player, child_stm: Player) -> f64 {
@@ -48,6 +66,22 @@ fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
     let mut bytes = [0; 8];
     reader.read_exact(&mut bytes)?;
     Ok(u64::from_le_bytes(bytes))
+}
+
+fn sample_strategy(strategy: &Actions, actions: usize, rng: &mut impl Rng) -> usize {
+    let weights = &strategy[..actions];
+    let total: f64 = weights.iter().map(|&x| x as f64).sum();
+    let draw = rng.random::<f64>() * total;
+
+    let mut cumulative = 0.0;
+    for i in 0..actions {
+        cumulative += strategy[i] as f64;
+        if draw < cumulative {
+            return i;
+        }
+    }
+
+    return actions - 1;
 }
 
 pub struct EngineGroups {
@@ -161,6 +195,8 @@ pub struct Solver {
     nodes: Vec<BettingNode>,
     street_groups: [Box<dyn Group>; Street::COUNT],
     iters: usize,
+    nodes_touched: u64,
+    discount_period: u32,
 }
 
 impl Solver {
@@ -169,6 +205,8 @@ impl Solver {
             nodes: vec![],
             street_groups: groups.groups,
             iters: 0,
+            nodes_touched: 0,
+            discount_period: 1,
         }
     }
 
@@ -265,12 +303,12 @@ impl Solver {
         &mut self,
         data: &InfosetData,
         actions: usize,
-        rng: &mut impl Rng,
+        _rng: &mut impl Rng,
     ) -> Actions {
         let regrets = &data.regret_sum;
         let total: f64 = regrets[..actions].iter().map(|x| x.max(0.0) as f64).sum();
         let mut strategy = [0.0; MAX_ACTIONS];
-        if total < f64::EPSILON || rng.random_ratio(1, 10000) {
+        if total < f64::EPSILON {
             strategy[..actions].fill(1.0 / actions as f32);
         } else {
             for i in 0..actions {
@@ -397,10 +435,6 @@ impl Solver {
         return value;
     }
 
-    fn can_regret_prune(&self) -> bool {
-        self.iters % 20 != 0
-    }
-
     fn mc_cfr(
         &mut self,
         responder: Player,
@@ -409,6 +443,7 @@ impl Solver {
         board_group: &BoardGroups,
         rng: &mut impl Rng,
     ) -> f64 {
+        self.nodes_touched += 1;
         // terminal
         // TODO: we actually don't need board
         if let Outcome::Winnings(winnings) = board.outcome() {
@@ -419,14 +454,13 @@ impl Solver {
 
         let actions = board.get_actions();
         let group = board_group[board.stm() as usize][board.street() as usize];
+        self.nodes[node].policy[group].discount_to(self.discount_period);
         let data = self.nodes[node].policy[group];
-
         let strategy = self.regret_matching(&data, actions.len(), rng);
 
         let value: f64;
         if board.stm() != responder {
-            let dist = WeightedIndex::new(&strategy).unwrap();
-            let sampled = dist.sample(rng);
+            let sampled = sample_strategy(&strategy, actions.len(), rng);
             let action = actions[sampled];
 
             let mut new_board = board.clone();
@@ -435,26 +469,13 @@ impl Solver {
             let child_node = self.nodes[node].children[sampled];
             value = self.mc_cfr(responder, &new_board, child_node, board_group, rng);
 
-            let t = self.iters as f64;
             let data = &mut self.nodes[node].policy[group];
             for i in 0..actions.len() {
-                data.strategy_sum[i] += (t * strategy[i] as f64) as f32;
+                data.strategy_sum[i] += strategy[i];
             }
         } else {
             let mut counterfactual_value = [0.0_f64; MAX_ACTIONS];
-            let regret_sum = self.nodes[node].policy[group].regret_sum;
-            let mut pruned = [false; MAX_ACTIONS];
             for (i, action) in actions.iter().enumerate() {
-                // we have eps exploration so the strategy[i] check is needed
-                if self.can_regret_prune()
-                    && strategy[i] <= f32::EPSILON
-                    && regret_sum[i] < -10000.0
-                {
-                    // regret prune
-                    pruned[i] = true;
-                    continue;
-                }
-
                 let mut new_board = board.clone();
                 new_board.play(*action);
 
@@ -474,11 +495,7 @@ impl Solver {
             // regret sum update
             let data = &mut self.nodes[node].policy[group];
             for i in 0..actions.len() {
-                if pruned[i] {
-                    continue;
-                }
-
-                data.regret_sum[i] = data.regret_sum[i] + (counterfactual_value[i] - value) as f32;
+                data.regret_sum[i] += (counterfactual_value[i] - value) as f32;
             }
         }
 
@@ -619,8 +636,7 @@ impl Solver {
             } else {
                 let strategy =
                     self.average_strategy(&self.nodes[node_id].policy[group], actions.len());
-                let dist = WeightedIndex::new(&strategy[..actions.len()]).unwrap();
-                dist.sample(rng)
+                sample_strategy(&strategy, actions.len(), rng)
             };
 
             board.play(actions[sampled]);
@@ -641,7 +657,7 @@ impl Solver {
             response
         });
 
-        let mut rng = rand::rng();
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
         let mut mean = 0.0;
         let mut m2 = 0.0;
         for iter in 0..iters {
@@ -676,11 +692,11 @@ impl Solver {
             return;
         }
 
-        const ITER_PRINT: usize = 20_000;
-        // aim for per 2-3 min
-        const ITER_SAVE: usize = 5_000_000;
-        // aim for per min
-        const ITER_RESPONSE: usize = 5_000_000;
+        const ITER_PRINT: usize = 100_000;
+        // aim for per 5 min
+        const ITER_SAVE: usize = 20_000_000;
+        // aim for per 5 min
+        const ITER_RESPONSE: usize = 20_000_000;
 
         std::fs::create_dir_all(filename).unwrap();
         println!(
@@ -693,18 +709,21 @@ impl Solver {
             self.make_betting_tree();
         }
 
-        let mut rng = rand::rng();
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
 
-        let target = self.iters + iters;
+        let initial_iters = self.iters;
+        let target = self.iters.saturating_add(iters);
         let start = Instant::now();
         while self.iters < target {
             self.iters += 1;
 
             if self.iters % ITER_PRINT == 0 {
                 println!(
-                    "info cfr iter {} iter/s {}",
+                    "info cfr iter {} period {} iter/s {}",
                     self.iters,
-                    self.iters as u64 * 1000 / (start.elapsed().as_millis() as u64).max(1)
+                    self.discount_period,
+                    (self.iters - initial_iters) as u64 * 1000
+                        / (start.elapsed().as_millis() as u64).max(1)
                 );
             }
 
@@ -715,6 +734,7 @@ impl Solver {
                 let board = Board::new();
                 let board_groups = self.make_board_group(&board);
                 self.mc_cfr(player, &board, Some(0), &board_groups, &mut rng);
+                self.discount_period = (self.nodes_touched / DISCOUNT_NODES_PER_PERIOD + 1) as u32;
             }
 
             if self.iters % ITER_SAVE == 0 || self.iters == target {
@@ -734,12 +754,19 @@ impl Solver {
             Self::CHECKPOINT_BUFFER_SIZE,
             File::create(filename).unwrap(),
         );
-        Self::write_checkpoint(&self.nodes, writer).unwrap();
+        Self::write_checkpoint(&self.nodes, self.iters, self.nodes_touched, writer).unwrap();
     }
 
-    fn write_checkpoint(nodes: &[BettingNode], writer: impl Write) -> io::Result<()> {
+    fn write_checkpoint(
+        nodes: &[BettingNode],
+        iters: usize,
+        nodes_touched: u64,
+        writer: impl Write,
+    ) -> io::Result<()> {
         let mut encoder = zstd::stream::write::Encoder::new(writer, 7)?;
         encoder.write_all(&(nodes.len() as u64).to_le_bytes())?;
+        encoder.write_all(&(iters as u64).to_le_bytes())?;
+        encoder.write_all(&nodes_touched.to_le_bytes())?;
 
         for data in nodes {
             let raw = postcard::to_allocvec(data)
@@ -755,13 +782,17 @@ impl Solver {
         let reader =
             BufReader::with_capacity(Self::CHECKPOINT_BUFFER_SIZE, File::open(filename).unwrap());
         let mut solver = Self::new(groups);
-        solver.nodes = Self::read_checkpoint(reader);
+        (solver.nodes, solver.iters, solver.nodes_touched) = Self::read_checkpoint(reader);
+        solver.discount_period =
+            u32::try_from(solver.nodes_touched / DISCOUNT_NODES_PER_PERIOD + 1).unwrap();
         solver
     }
 
-    fn read_checkpoint(reader: impl Read) -> Vec<BettingNode> {
+    fn read_checkpoint(reader: impl Read) -> (Vec<BettingNode>, usize, u64) {
         let mut reader = zstd::stream::read::Decoder::new(reader).unwrap();
         let count = read_u64(&mut reader).unwrap() as usize;
+        let iters = read_u64(&mut reader).unwrap() as usize;
+        let nodes_touched = read_u64(&mut reader).unwrap();
         let mut nodes = Vec::with_capacity(count);
         let mut bytes = vec![];
 
@@ -772,7 +803,7 @@ impl Solver {
             nodes.push(postcard::from_bytes(&bytes).unwrap());
         }
 
-        nodes
+        (nodes, iters, nodes_touched)
     }
 
     pub fn lookup(&mut self, board: &Board, history: &[Action]) -> Actions {

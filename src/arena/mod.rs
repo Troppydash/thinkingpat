@@ -1,4 +1,4 @@
-use rand::{Rng, RngExt};
+use rand::{Rng, RngExt, SeedableRng};
 
 use crate::{
     bot::bot::Bot,
@@ -76,7 +76,7 @@ impl Arena {
     }
 
     pub fn play(&mut self, iters: usize) {
-        let mut rng = rand::rng();
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
 
         let mut mean_payout = 0.0;
         let mut m2_payout = 0.0;

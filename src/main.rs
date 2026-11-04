@@ -57,7 +57,7 @@ fn cfr_solve(filename: &str, path: &str, iters: usize) {
 }
 
 fn test_random(filename: &str, path: &str, iters: usize) {
-    let groups = try_load(&EngineGroupsVersions::V2, path);
+    let groups = try_load(&EngineGroupsVersions::V3, path);
     let solver = Solver::load(filename, groups);
     let cfr = Cfr::new(solver);
     let mut arena = Arena::new([Box::new(cfr), Box::new(Random)]);
@@ -65,7 +65,7 @@ fn test_random(filename: &str, path: &str, iters: usize) {
 }
 
 fn test_equity(filename: &str, path: &str, iters: usize) {
-    let groups = try_load(&EngineGroupsVersions::V2, path);
+    let groups = try_load(&EngineGroupsVersions::V3, path);
     let solver = Solver::load(filename, groups);
     let cfr = Cfr::new(solver);
     let mut arena = Arena::new([Box::new(cfr), Box::new(bot::equity::Equity)]);
@@ -113,8 +113,7 @@ fn ui(args: Vec<String>) {
                 "solve" => {
                     let path = parts[1];
                     let filename = parts[2];
-                    let iters: usize = parts[3].parse().unwrap();
-                    cfr_solve(filename, path, iters);
+                    cfr_solve(filename, path, usize::MAX);
                 }
                 _ => {
                     println!("warn unknown cfr command {}", parts[0]);
