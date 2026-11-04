@@ -63,6 +63,45 @@ impl Vectordb for U {
     }
 }
 
+pub struct Linear {
+    data: Vec<(u64, EquityVector)>,
+}
+
+impl Linear {
+    pub fn new() -> Self {
+        Self { data: vec![] }
+    }
+}
+
+impl Vectordb for Linear {
+    fn reserve(&mut self, size: usize) {
+        self.data.reserve_exact(size);
+    }
+
+    fn store(&mut self, key: u64, x: &EquityVector) {
+        self.data.push((key, x.clone()));
+    }
+
+    fn query(&self, x: &EquityVector) -> (u64, f32) {
+        let mut best_distance = f32::MAX;
+        let mut best = 0;
+
+        for (key, data) in self.data.iter() {
+            let distance: f32 = x.iter().zip(data).map(|(a, b)| (a - b).abs()).sum();
+            if distance < best_distance {
+                best_distance = distance;
+                best = *key;
+            }
+        }
+
+        (best, best_distance)
+    }
+
+    fn reset(&mut self) {
+        self.data.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

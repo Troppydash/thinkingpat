@@ -54,7 +54,7 @@ pub struct EngineGroups {
     pub groups: [Box<dyn Group>; Street::COUNT],
 }
 
-versions!(EngineGroupsVersions, V1, V2);
+versions!(EngineGroupsVersions, V1, V2, V3);
 
 impl Versioned<EngineGroupsVersions> for EngineGroups {
     fn build(version: &EngineGroupsVersions, path: &str) -> Self {
@@ -102,6 +102,30 @@ impl Versioned<EngineGroupsVersions> for EngineGroups {
                         )),
                         Street::River => Box::new(try_load::<RiverGroupVersions, RiverGroup>(
                             &RiverGroupVersions::V2,
+                            path,
+                        )),
+                    }
+                }),
+            },
+            EngineGroupsVersions::V3 => Self {
+                groups: Street::ALL.map(|street| -> Box<dyn Group> {
+                    match street {
+                        Street::Preflop => {
+                            Box::new(try_load::<PreflopGroupVersions, PreflopGroup>(
+                                &PreflopGroupVersions::V3,
+                                path,
+                            ))
+                        }
+                        Street::Flop => Box::new(try_load::<FlopGroupVersions, FlopGroup>(
+                            &FlopGroupVersions::V3,
+                            path,
+                        )),
+                        Street::Turn => Box::new(try_load::<TurnGroupVersions, TurnGroup>(
+                            &TurnGroupVersions::V3,
+                            path,
+                        )),
+                        Street::River => Box::new(try_load::<RiverGroupVersions, RiverGroup>(
+                            &RiverGroupVersions::V3,
                             path,
                         )),
                     }
@@ -373,6 +397,10 @@ impl Solver {
         return value;
     }
 
+    fn can_regret_prune(&self) -> bool {
+        self.iters % 20 != 0
+    }
+
     fn mc_cfr(
         &mut self,
         responder: Player,
@@ -414,7 +442,19 @@ impl Solver {
             }
         } else {
             let mut counterfactual_value = [0.0_f64; MAX_ACTIONS];
+            let regret_sum = self.nodes[node].policy[group].regret_sum;
+            let mut pruned = [false; MAX_ACTIONS];
             for (i, action) in actions.iter().enumerate() {
+                // we have eps exploration so the strategy[i] check is needed
+                if self.can_regret_prune()
+                    && strategy[i] <= f32::EPSILON
+                    && regret_sum[i] < -10000.0
+                {
+                    // regret prune
+                    pruned[i] = true;
+                    continue;
+                }
+
                 let mut new_board = board.clone();
                 new_board.play(*action);
 
@@ -431,10 +471,13 @@ impl Solver {
                 .map(|(i, v)| strategy[i] as f64 * v)
                 .sum();
 
-            // TODO: regret prune
             // regret sum update
             let data = &mut self.nodes[node].policy[group];
             for i in 0..actions.len() {
+                if pruned[i] {
+                    continue;
+                }
+
                 data.regret_sum[i] = data.regret_sum[i] + (counterfactual_value[i] - value) as f32;
             }
         }
@@ -637,7 +680,7 @@ impl Solver {
         // aim for per 2-3 min
         const ITER_SAVE: usize = 5_000_000;
         // aim for per min
-        const ITER_RESPONSE: usize = 2_000_000;
+        const ITER_RESPONSE: usize = 5_000_000;
 
         std::fs::create_dir_all(filename).unwrap();
         println!(

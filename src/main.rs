@@ -51,7 +51,7 @@ fn visualize_groups(samples: usize, path: &str) {
 }
 
 fn cfr_solve(filename: &str, path: &str, iters: usize) {
-    let groups = try_load(&EngineGroupsVersions::V2, path);
+    let groups = try_load(&EngineGroupsVersions::V3, path);
     let mut solver = Solver::new(groups);
     solver.solve(filename, iters);
 }
