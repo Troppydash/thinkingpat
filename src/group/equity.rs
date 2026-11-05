@@ -141,6 +141,15 @@ fn kmeans(
         }
     }
 
+    // within-cluster-sum-of-squares
+    let mut cost = 0.0;
+    for sample in points.iter() {
+        let (_centroid, distance) = db.query(&sample);
+        cost += distance.abs();
+    }
+
+    println!("info kmeans final within_cluster_l1 {}", cost as f32);
+
     centroids
 }
 
@@ -176,7 +185,7 @@ pub struct PreflopGroup {
     index: SuitIndex,
 }
 
-versions!(PreflopGroupVersions, V1, V2, V3, Elbow);
+versions!(PreflopGroupVersions, V1, V2, V3, V4, Elbow);
 
 impl Versioned<PreflopGroupVersions> for PreflopGroup {
     fn build(version: &PreflopGroupVersions, path: &str) -> Self {
@@ -235,6 +244,24 @@ impl Versioned<PreflopGroupVersions> for PreflopGroup {
                 Self {
                     db: make_linear_db(&centroids),
 
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
+            PreflopGroupVersions::V4 => {
+                let groups = 40;
+                let centroids = kmeans(
+                    10000,
+                    groups,
+                    sample::BINS,
+                    Street::Preflop,
+                    rng,
+                    |hand, _community| equity.equity(hand, &index).to_vec(),
+                );
+
+                Self {
+                    db: make_linear_db(&centroids),
                     centroids,
                     equity,
                     index,
@@ -304,6 +331,12 @@ impl Versioned<PreflopGroupVersions> for PreflopGroup {
                 equity,
                 index,
             },
+            PreflopGroupVersions::V4 => Self {
+                db: make_linear_db(&data.centroids),
+                centroids: data.centroids,
+                equity,
+                index,
+            },
             PreflopGroupVersions::Elbow => {
                 unimplemented!()
             }
@@ -314,7 +347,7 @@ impl Versioned<PreflopGroupVersions> for PreflopGroup {
         match *version {
             PreflopGroupVersions::V1 => true,
             PreflopGroupVersions::V2 => true,
-            PreflopGroupVersions::V3 => true,
+            PreflopGroupVersions::V3 | PreflopGroupVersions::V4 => true,
             PreflopGroupVersions::Elbow => false,
         }
     }
@@ -343,7 +376,7 @@ pub struct FlopGroup {
     index: SuitIndex,
 }
 
-versions!(FlopGroupVersions, V1, V2, V3, Elbow);
+versions!(FlopGroupVersions, V1, V2, V3, V4, Elbow);
 
 impl Versioned<FlopGroupVersions> for FlopGroup {
     fn build(version: &FlopGroupVersions, path: &str) -> Self {
@@ -390,6 +423,23 @@ impl Versioned<FlopGroupVersions> for FlopGroup {
                 let centroids = kmeans(
                     10000,
                     30,
+                    texture::BINS,
+                    Street::Flop,
+                    rng,
+                    |hand, community| equity.equity(hand, community, &index).to_vec(),
+                );
+
+                Self {
+                    db: make_linear_db(&centroids),
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
+            FlopGroupVersions::V4 => {
+                let centroids = kmeans(
+                    10000,
+                    200,
                     texture::BINS,
                     Street::Flop,
                     rng,
@@ -467,6 +517,12 @@ impl Versioned<FlopGroupVersions> for FlopGroup {
                 equity,
                 index,
             },
+            FlopGroupVersions::V4 => Self {
+                db: make_linear_db(&data.centroids),
+                centroids: data.centroids,
+                equity,
+                index,
+            },
             FlopGroupVersions::Elbow => unimplemented!(),
         }
     }
@@ -475,7 +531,7 @@ impl Versioned<FlopGroupVersions> for FlopGroup {
         match *version {
             FlopGroupVersions::V1 => true,
             FlopGroupVersions::V2 => true,
-            FlopGroupVersions::V3 => true,
+            FlopGroupVersions::V3 | FlopGroupVersions::V4 => true,
             FlopGroupVersions::Elbow => false,
         }
     }
@@ -504,7 +560,7 @@ pub struct TurnGroup {
     index: SuitIndex,
 }
 
-versions!(TurnGroupVersions, V1, V2, V3, Elbow);
+versions!(TurnGroupVersions, V1, V2, V3, V4, Elbow);
 
 impl Versioned<TurnGroupVersions> for TurnGroup {
     fn build(version: &TurnGroupVersions, path: &str) -> Self {
@@ -550,6 +606,23 @@ impl Versioned<TurnGroupVersions> for TurnGroup {
                 let centroids = kmeans(
                     10000,
                     30,
+                    texture::BINS,
+                    Street::Turn,
+                    rng,
+                    |hand, community| equity.equity(hand, community, &index).to_vec(),
+                );
+
+                Self {
+                    db: make_linear_db(&centroids),
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
+            TurnGroupVersions::V4 => {
+                let centroids = kmeans(
+                    10000,
+                    200,
                     texture::BINS,
                     Street::Turn,
                     rng,
@@ -621,7 +694,7 @@ impl Versioned<TurnGroupVersions> for TurnGroup {
                 equity,
                 index,
             },
-            TurnGroupVersions::V3 => Self {
+            TurnGroupVersions::V3 | TurnGroupVersions::V4 => Self {
                 db: make_linear_db(&data.centroids),
                 centroids: data.centroids,
                 equity,
@@ -635,7 +708,7 @@ impl Versioned<TurnGroupVersions> for TurnGroup {
         match *version {
             TurnGroupVersions::V1 => true,
             TurnGroupVersions::V2 => true,
-            TurnGroupVersions::V3 => true,
+            TurnGroupVersions::V3 | TurnGroupVersions::V4 => true,
             TurnGroupVersions::Elbow => false,
         }
     }
@@ -665,7 +738,7 @@ pub struct RiverGroup {
     index: SuitIndex,
 }
 
-versions!(RiverGroupVersions, V1, V2, V3, Elbow);
+versions!(RiverGroupVersions, V1, V2, V3, V4, Elbow);
 
 impl Versioned<RiverGroupVersions> for RiverGroup {
     fn build(version: &RiverGroupVersions, path: &str) -> Self {
@@ -700,6 +773,18 @@ impl Versioned<RiverGroupVersions> for RiverGroup {
             }
             RiverGroupVersions::V3 => {
                 let centroids = kmeans(10000, 10, 1, Street::River, rng, |hand, community| {
+                    vec![equity.equity(hand, community, &index)]
+                });
+
+                Self {
+                    db: make_linear_db(&centroids),
+                    centroids,
+                    equity,
+                    index,
+                }
+            }
+            RiverGroupVersions::V4 => {
+                let centroids = kmeans(10000, 100, 1, Street::River, rng, |hand, community| {
                     vec![equity.equity(hand, community, &index)]
                 });
 
@@ -758,7 +843,7 @@ impl Versioned<RiverGroupVersions> for RiverGroup {
                 equity,
                 index,
             },
-            RiverGroupVersions::V3 => Self {
+            RiverGroupVersions::V3 | RiverGroupVersions::V4 => Self {
                 db: make_linear_db(&data.centroids),
                 centroids: data.centroids,
                 equity,
@@ -772,7 +857,7 @@ impl Versioned<RiverGroupVersions> for RiverGroup {
         match *version {
             RiverGroupVersions::V1 => true,
             RiverGroupVersions::V2 => true,
-            RiverGroupVersions::V3 => true,
+            RiverGroupVersions::V3 | RiverGroupVersions::V4 => true,
             RiverGroupVersions::Elbow => false,
         }
     }

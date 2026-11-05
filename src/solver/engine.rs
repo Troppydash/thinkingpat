@@ -24,7 +24,7 @@ use crate::{
 };
 
 pub const MAX_ACTIONS: usize = 3;
-const DISCOUNT_NODES_PER_PERIOD: u64 = 10_000_000;
+const DISCOUNT_NODES_PER_PERIOD: u64 = 20_000_000;
 type Actions = [f32; MAX_ACTIONS];
 type Belief = Vec<(Board, f64)>;
 type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
@@ -86,14 +86,16 @@ fn sample_strategy(strategy: &Actions, actions: usize, rng: &mut impl Rng) -> us
 
 pub struct EngineGroups {
     pub groups: [Box<dyn Group>; Street::COUNT],
+    card_history: usize,
 }
 
-versions!(EngineGroupsVersions, V1, V2, V3);
+versions!(EngineGroupsVersions, V1, V2, V3, V4);
 
 impl Versioned<EngineGroupsVersions> for EngineGroups {
     fn build(version: &EngineGroupsVersions, path: &str) -> Self {
         match *version {
             EngineGroupsVersions::V1 => Self {
+                card_history: Street::COUNT,
                 groups: Street::ALL.map(|street| -> Box<dyn Group> {
                     match street {
                         Street::Preflop => {
@@ -118,6 +120,7 @@ impl Versioned<EngineGroupsVersions> for EngineGroups {
                 }),
             },
             EngineGroupsVersions::V2 => Self {
+                card_history: Street::COUNT,
                 groups: Street::ALL.map(|street| -> Box<dyn Group> {
                     match street {
                         Street::Preflop => {
@@ -142,6 +145,7 @@ impl Versioned<EngineGroupsVersions> for EngineGroups {
                 }),
             },
             EngineGroupsVersions::V3 => Self {
+                card_history: Street::COUNT,
                 groups: Street::ALL.map(|street| -> Box<dyn Group> {
                     match street {
                         Street::Preflop => {
@@ -160,6 +164,29 @@ impl Versioned<EngineGroupsVersions> for EngineGroups {
                         )),
                         Street::River => Box::new(try_load::<RiverGroupVersions, RiverGroup>(
                             &RiverGroupVersions::V3,
+                            path,
+                        )),
+                    }
+                }),
+            },
+            EngineGroupsVersions::V4 => Self {
+                card_history: 2,
+                groups: Street::ALL.map(|street| -> Box<dyn Group> {
+                    match street {
+                        Street::Preflop => Box::new(try_load::<PreflopGroupVersions, PreflopGroup>(
+                            &PreflopGroupVersions::V4,
+                            path,
+                        )),
+                        Street::Flop => Box::new(try_load::<FlopGroupVersions, FlopGroup>(
+                            &FlopGroupVersions::V4,
+                            path,
+                        )),
+                        Street::Turn => Box::new(try_load::<TurnGroupVersions, TurnGroup>(
+                            &TurnGroupVersions::V4,
+                            path,
+                        )),
+                        Street::River => Box::new(try_load::<RiverGroupVersions, RiverGroup>(
+                            &RiverGroupVersions::V4,
                             path,
                         )),
                     }
@@ -194,6 +221,7 @@ pub struct Solver {
     // TODO: this can be reordered for perf
     nodes: Vec<BettingNode>,
     street_groups: [Box<dyn Group>; Street::COUNT],
+    card_history: usize,
     iters: usize,
     nodes_touched: u64,
     discount_period: u32,
@@ -204,6 +232,7 @@ impl Solver {
         Self {
             nodes: vec![],
             street_groups: groups.groups,
+            card_history: groups.card_history,
             iters: 0,
             nodes_touched: 0,
             discount_period: 1,
@@ -215,17 +244,22 @@ impl Solver {
     }
 
     fn estimate_memory(&self) -> usize {
-        self.street_groups
-            .iter()
-            .map(|g| g.size())
+        self.group_streets(Street::River)
+            .map(|street| self.street_groups[street].size())
             .product::<usize>()
             * self.estimate_tree()
+    }
+
+    fn group_streets(&self, street: Street) -> std::ops::Range<usize> {
+        let end = street as usize + 1;
+        end.saturating_sub(self.card_history)..end
     }
 
     fn make_board_group(&self, board: &Board) -> BoardGroups {
         let mut groups = [[0; Street::COUNT]; Player::COUNT];
         let cards = board.card_state_full();
         for player in Player::ALL {
+            let mut street_groups = [0; Street::COUNT];
             for street in Street::ALL {
                 let hand = cards.hands[player as usize];
                 let community = cards.community[..street.visible_community()]
@@ -233,17 +267,14 @@ impl Solver {
                     .copied()
                     .collect();
 
-                let group = self.street_groups[street as usize].map(hand, community);
+                street_groups[street as usize] =
+                    self.street_groups[street as usize].map(hand, community);
 
-                let total_group = if street == Street::Preflop {
-                    group
-                } else {
-                    group
-                        + groups[player as usize][street as usize - 1]
-                            * self.street_groups[street as usize].size()
-                };
-
-                groups[player as usize][street as usize] = total_group;
+                groups[player as usize][street as usize] = self
+                    .group_streets(street)
+                    .fold(0, |group, s| {
+                        group * self.street_groups[s].size() + street_groups[s]
+                    });
             }
         }
 
@@ -271,10 +302,9 @@ impl Solver {
             return None;
         }
 
-        let groups: usize = Street::ALL
-            .iter()
-            .filter(|&s| s <= &board.street())
-            .map(|&s| self.street_groups[s as usize].size())
+        let groups: usize = self
+            .group_streets(board.street())
+            .map(|street| self.street_groups[street].size())
             .product();
         let node_id = self.nodes.len();
         self.nodes.push(BettingNode {
@@ -822,17 +852,14 @@ impl Solver {
 
         let cards = board.card_state();
         let mut group = 0;
-        for street in Street::ALL {
-            if street > board.street() {
-                break;
-            }
-
+        for s in self.group_streets(board.street()) {
+            let street = Street::ALL[s];
             let community = cards.community[..street.visible_community()]
                 .iter()
                 .copied()
                 .collect();
 
-            let g = &self.street_groups[street as usize];
+            let g = &self.street_groups[s];
             group = group * g.size() + g.map(cards.hands[board.stm() as usize], community)
         }
 

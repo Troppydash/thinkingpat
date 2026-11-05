@@ -22,3 +22,12 @@ https://www.desmos.com/calculator/z9bo4weu63
 - 260m iters, around 1h
 - exploitability -0.7
 - 0.3281935483870922 +- 0.06252646680024185 against equity
+
+
+11_05
+- 40, 200, 200, 100
+- last 2 groups only
+- 1.14b iters, around 7 hours
+- response_strength -1.64795 +- 0.03866 sb
+- 0.2606799999999989 +- 0.08007364903902123 against equity
+- 0.05345956873315552 +- 0.02294816761648628 against 11_04

@@ -24,7 +24,7 @@ mod ver;
 
 fn visualize_groups(samples: usize, path: &str) {
     let groups =
-        try_load::<EngineGroupsVersions, EngineGroups>(&EngineGroupsVersions::V2, path).groups;
+        try_load::<EngineGroupsVersions, EngineGroups>(&EngineGroupsVersions::V4, path).groups;
     let rng = &mut rand::rng();
 
     for street in Street::ALL {
@@ -51,13 +51,13 @@ fn visualize_groups(samples: usize, path: &str) {
 }
 
 fn cfr_solve(filename: &str, path: &str, iters: usize) {
-    let groups = try_load(&EngineGroupsVersions::V3, path);
+    let groups = try_load(&EngineGroupsVersions::V4, path);
     let mut solver = Solver::new(groups);
     solver.solve(filename, iters);
 }
 
 fn test_random(filename: &str, path: &str, iters: usize) {
-    let groups = try_load(&EngineGroupsVersions::V3, path);
+    let groups = try_load(&EngineGroupsVersions::V4, path);
     let solver = Solver::load(filename, groups);
     let cfr = Cfr::new(solver);
     let mut arena = Arena::new([Box::new(cfr), Box::new(Random)]);
@@ -65,7 +65,7 @@ fn test_random(filename: &str, path: &str, iters: usize) {
 }
 
 fn test_equity(filename: &str, path: &str, iters: usize) {
-    let groups = try_load(&EngineGroupsVersions::V3, path);
+    let groups = try_load(&EngineGroupsVersions::V4, path);
     let solver = Solver::load(filename, groups);
     let cfr = Cfr::new(solver);
     let mut arena = Arena::new([Box::new(cfr), Box::new(bot::equity::Equity)]);
@@ -73,12 +73,12 @@ fn test_equity(filename: &str, path: &str, iters: usize) {
 }
 
 fn test_versions(filename_a: &str, filename_b: &str, path: &str, iters: usize) {
-    let groups_a = try_load(&EngineGroupsVersions::V2, path);
+    let groups_a = try_load(&EngineGroupsVersions::V4, path);
 
     let solver_a = Solver::load(filename_a, groups_a);
     let cfr_a = Cfr::new(solver_a);
 
-    let groups_b = try_load(&EngineGroupsVersions::V1, path);
+    let groups_b = try_load(&EngineGroupsVersions::V3, path);
     let solver_b = Solver::load(filename_b, groups_b);
     let cfr_b = Cfr::new(solver_b);
 
