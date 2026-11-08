@@ -114,6 +114,27 @@ impl Not for Player {
     }
 }
 
+impl FromStr for Player {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "bb" => Ok(Self::BB),
+            "sb" => Ok(Self::SB),
+            _ => Err(()),
+        }
+    }
+}
+
+impl ToString for Player {
+    fn to_string(&self) -> String {
+        match self {
+            Self::BB => "bb".into(),
+            Self::SB => "sb".into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct CardState<Community: Hash = [Card; 5]> {
     pub hands: [CardSet; Player::COUNT],
@@ -132,6 +153,25 @@ impl CardState {
             community,
         }
     }
+
+    fn new_with_public(side: Player, hand: CardSet, visible: &[Card]) -> Self {
+        let mut rng = rand::rng();
+        let taken = hand | visible.iter().cloned().collect::<CardSet>();
+        let opp_hand = CardSet::sample_remain(taken, &mut rng, 2);
+        let remaining_community =
+            CardSet::sample_remain_ordered_n(taken | opp_hand, &mut rng, 5 - visible.len());
+
+        let mut hands = [CardSet::EMPTY; Player::COUNT];
+        hands[side as usize] = hand;
+        hands[!side as usize] = opp_hand;
+
+        let mut community = visible.to_vec();
+        community.extend_from_slice(&remaining_community);
+        Self {
+            hands,
+            community: community.try_into().unwrap(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -140,6 +180,33 @@ pub enum Action {
     Call,
     // the i16 is EXTRA in additional to existing raises
     Raise(i16),
+}
+
+impl FromStr for Action {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.starts_with('r') {
+            let amount: i16 = s[1..].parse().unwrap();
+            return Ok(Self::Raise(amount));
+        }
+
+        match s {
+            "f" => Ok(Self::Fold),
+            "c" => Ok(Self::Call),
+            _ => Err(()),
+        }
+    }
+}
+
+impl ToString for Action {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Fold => "f".into(),
+            Self::Call => "c".into(),
+            Self::Raise(amount) => format!("r{}", amount),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -198,6 +265,10 @@ impl Board {
             outcome: Outcome::Ongoing,
             showdown,
         }
+    }
+
+    pub fn new_with_public(side: Player, hand: CardSet, visible: &[Card]) -> Self {
+        Self::with_cards(CardState::new_with_public(side, hand, visible))
     }
 
     pub fn card_state(&self) -> CardState<&[Card]> {

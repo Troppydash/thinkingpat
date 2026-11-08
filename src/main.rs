@@ -1,15 +1,26 @@
 #![cfg_attr(target_arch = "aarch64", feature(stdarch_aarch64_prefetch))]
 
 use core::panic;
+use std::str::FromStr;
 
 use rustyline::DefaultEditor;
 
 use crate::{
     arena::Arena,
-    bot::{cfr::Cfr, random::Random},
-    game::{board::Street, card::CardSet},
+    bot::{
+        bot::Bot,
+        cfr::{Cfr, CfrSolver},
+        random::Random,
+    },
+    game::{
+        board::{Action, Board, Player, Street},
+        card::{Card, CardSet},
+    },
     group::equity::to_pdf,
-    solver::engine::{EngineGroups, EngineGroupsVersions, Solver},
+    solver::{
+        engine::{EngineGroups, EngineGroupsVersions, Solver},
+        inference::InferenceSolver,
+    },
     ver::try_load,
 };
 
@@ -50,44 +61,48 @@ fn visualize_groups(samples: usize, path: &str) {
     }
 }
 
+const LATEST: EngineGroupsVersions = EngineGroupsVersions::V4;
+
 fn cfr_solve(filename: &str, path: &str, iters: usize) {
-    let groups = try_load(&EngineGroupsVersions::V4, path);
+    let groups = try_load(&LATEST, path);
     let mut solver = Solver::new(groups);
     solver.solve(filename, iters);
 }
 
 fn test_random(filename: &str, path: &str, iters: usize) {
-    let groups = try_load(&EngineGroupsVersions::V4, path);
+    let groups = try_load(&LATEST, path);
     let solver = Solver::load(filename, groups);
-    let cfr = Cfr::new(solver);
+    let cfr = Cfr::new(CfrSolver::Train(solver));
     let mut arena = Arena::new([Box::new(cfr), Box::new(Random)]);
     arena.play(iters);
 }
 
 fn test_equity(filename: &str, path: &str, iters: usize) {
-    let groups = try_load(&EngineGroupsVersions::V4, path);
+    let groups = try_load(&LATEST, path);
     let solver = Solver::load(filename, groups);
-    let cfr = Cfr::new(solver);
+    let cfr = Cfr::new(CfrSolver::Train(solver));
     let mut arena = Arena::new([Box::new(cfr), Box::new(bot::equity::Equity)]);
     arena.play(iters);
 }
 
 fn test_versions(filename_a: &str, filename_b: &str, path: &str, iters: usize) {
-    let groups_a = try_load(&EngineGroupsVersions::V4, path);
+    let groups_a = try_load(&LATEST, path);
 
     let solver_a = Solver::load(filename_a, groups_a);
-    let cfr_a = Cfr::new(solver_a);
+    let cfr_a = Cfr::new(CfrSolver::Train(solver_a));
 
     let groups_b = try_load(&EngineGroupsVersions::V3, path);
     let solver_b = Solver::load(filename_b, groups_b);
-    let cfr_b = Cfr::new(solver_b);
+    let cfr_b = Cfr::new(CfrSolver::Train(solver_b));
 
     let mut arena = Arena::new([Box::new(cfr_a), Box::new(cfr_b)]);
     arena.play(iters);
 }
 
 fn ui(args: Vec<String>) {
-    let process_line = |line: &String| -> bool {
+    let mut engine: Option<Cfr> = None;
+
+    let mut process_line = |line: &String| -> bool {
         let parts: Vec<_> = line.split_whitespace().collect();
         let command = parts[0];
         let parts = &parts[1..];
@@ -119,7 +134,7 @@ fn ui(args: Vec<String>) {
                     println!("warn unknown cfr command {}", parts[0]);
                 }
             },
-            "play" => match parts[0] {
+            "test" => match parts[0] {
                 "random" => {
                     let path = parts[1];
                     let filename = parts[2];
@@ -145,6 +160,75 @@ fn ui(args: Vec<String>) {
                     panic!("");
                 }
             },
+            "play" => match parts[0] {
+                "load" => {
+                    std::mem::drop(engine.take());
+
+                    let path = parts[1];
+                    let filename = parts[2];
+
+                    println!("info loading {} with {}", filename, path);
+                    let groups = try_load(&LATEST, path);
+                    let solver = InferenceSolver::load(filename, groups);
+                    engine = Some(Cfr::new(CfrSolver::Inference(solver)));
+                    println!("info done");
+                }
+                "newgame" => {}
+                "go" => {
+                    // format: side, street, hole card, community cards, actions
+
+                    let (board, history) = {
+                        let mut ptr = 1;
+
+                        let side = Player::from_str(parts[ptr]).unwrap();
+                        ptr += 1;
+
+                        let street = Street::from_str(parts[ptr]).unwrap();
+                        ptr += 1;
+
+                        let hand: CardSet = parts[ptr..ptr + 2]
+                            .iter()
+                            .map(|&card| Card::parse_card(card))
+                            .collect();
+                        ptr += 2;
+
+                        let mut community = vec![];
+                        for &card in &parts[ptr..ptr + street.visible_community()] {
+                            community.push(Card::parse_card(card));
+                            ptr += 1;
+                        }
+
+                        let mut board = Board::new_with_public(side, hand, &community);
+                        let mut actions = vec![];
+                        for &action in &parts[ptr..] {
+                            actions.push(Action::from_str(action).unwrap());
+                        }
+
+                        for action in actions.iter() {
+                            board.play(*action);
+                        }
+
+                        assert!(board.street() == street);
+                        assert!(board.stm() == side);
+
+                        (board, actions)
+                    };
+
+                    match &mut engine {
+                        None => println!("warn no engine configured"),
+                        Some(engine) => {
+                            let out = engine.play(&board, &history);
+                            println!("info bestmove {}", out.to_string());
+                        }
+                    }
+                }
+                _ => {
+                    println!("warn unknown play command {}", parts[0]);
+                }
+            },
+            "arena" => {
+                todo!()
+            }
             _ => {
                 println!("warn unknown command {}", command);
             }

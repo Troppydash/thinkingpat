@@ -277,6 +277,23 @@ impl CardSet {
         selected
     }
 
+    pub fn sample_remain_ordered_n(cards: CardSet, rng: &mut impl Rng, n: usize) -> Vec<Card> {
+        let mut out = vec![];
+        let mut i = 0;
+        let mut found = cards;
+        while i < n {
+            let card = Card(rng.random_range(0..Card::COUNT) as u8);
+            if found.contains(card) {
+                continue;
+            }
+            found.insert(card);
+            out.push(card);
+            i += 1;
+        }
+
+        out
+    }
+
     pub fn sample_remain_ordered<const N: usize, R: Rng>(cards: CardSet, rng: &mut R) -> [Card; N] {
         let mut out = [Card::DEFAULT; N];
         let mut i = 0;

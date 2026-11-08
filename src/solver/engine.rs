@@ -25,17 +25,17 @@ use crate::{
 
 pub const MAX_ACTIONS: usize = 3;
 const DISCOUNT_NODES_PER_PERIOD: u64 = 20_000_000;
-type Actions = [f32; MAX_ACTIONS];
+pub type Actions = [f32; MAX_ACTIONS];
 type Belief = Vec<(Board, f64)>;
 type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 type Response = FxHashMap<(usize, usize), usize>;
 
 #[repr(C)]
 #[derive(Default, Clone, Copy, Serialize, Deserialize)]
-struct InfosetData {
+pub struct InfosetData {
     // TODO: consider fixed point
     regret_sum: Actions,
-    strategy_sum: Actions,
+    pub strategy_sum: Actions,
     discount_period: u32,
 }
 
@@ -62,7 +62,7 @@ fn adjust_sign(x: f64, stm: Player, child_stm: Player) -> f64 {
     if stm != child_stm { -x } else { x }
 }
 
-fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
+pub fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
     let mut bytes = [0; 8];
     reader.read_exact(&mut bytes)?;
     Ok(u64::from_le_bytes(bytes))
@@ -86,7 +86,7 @@ fn sample_strategy(strategy: &Actions, actions: usize, rng: &mut impl Rng) -> us
 
 pub struct EngineGroups {
     pub groups: [Box<dyn Group>; Street::COUNT],
-    card_history: usize,
+    pub card_history: usize,
 }
 
 versions!(EngineGroupsVersions, V1, V2, V3, V4);
@@ -173,10 +173,12 @@ impl Versioned<EngineGroupsVersions> for EngineGroups {
                 card_history: 2,
                 groups: Street::ALL.map(|street| -> Box<dyn Group> {
                     match street {
-                        Street::Preflop => Box::new(try_load::<PreflopGroupVersions, PreflopGroup>(
-                            &PreflopGroupVersions::V4,
-                            path,
-                        )),
+                        Street::Preflop => {
+                            Box::new(try_load::<PreflopGroupVersions, PreflopGroup>(
+                                &PreflopGroupVersions::V4,
+                                path,
+                            ))
+                        }
                         Street::Flop => Box::new(try_load::<FlopGroupVersions, FlopGroup>(
                             &FlopGroupVersions::V4,
                             path,
@@ -210,11 +212,11 @@ impl Versioned<EngineGroupsVersions> for EngineGroups {
 
 /// Note that the history is encapsulated in the children *pointers
 #[derive(Clone, Serialize, Deserialize)]
-struct BettingNode {
+pub struct BettingNode {
     // indices of action childs
-    children: [Option<usize>; MAX_ACTIONS],
+    pub children: [Option<usize>; MAX_ACTIONS],
     // group indexed
-    policy: Vec<InfosetData>,
+    pub policy: Vec<InfosetData>,
 }
 
 pub struct Solver {
@@ -225,6 +227,12 @@ pub struct Solver {
     iters: usize,
     nodes_touched: u64,
     discount_period: u32,
+}
+
+pub struct SolverMetadata {
+    pub nodes: usize,
+    pub iters: usize,
+    pub nodes_touched: u64,
 }
 
 impl Solver {
@@ -270,9 +278,8 @@ impl Solver {
                 street_groups[street as usize] =
                     self.street_groups[street as usize].map(hand, community);
 
-                groups[player as usize][street as usize] = self
-                    .group_streets(street)
-                    .fold(0, |group, s| {
+                groups[player as usize][street as usize] =
+                    self.group_streets(street).fold(0, |group, s| {
                         group * self.street_groups[s].size() + street_groups[s]
                     });
             }
@@ -818,25 +825,40 @@ impl Solver {
         solver
     }
 
-    fn read_checkpoint(reader: impl Read) -> (Vec<BettingNode>, usize, u64) {
+    pub fn stream_checkpoint(
+        reader: impl Read,
+        mut node_callback: impl FnMut(BettingNode),
+    ) -> SolverMetadata {
         let mut reader = zstd::stream::read::Decoder::new(reader).unwrap();
-        let count = read_u64(&mut reader).unwrap() as usize;
+        let nodes = read_u64(&mut reader).unwrap() as usize;
         let iters = read_u64(&mut reader).unwrap() as usize;
         let nodes_touched = read_u64(&mut reader).unwrap();
-        let mut nodes = Vec::with_capacity(count);
-        let mut bytes = vec![];
 
-        for _ in 0..count {
+        let mut bytes = vec![];
+        for _ in 0..nodes {
             let size = read_u64(&mut reader).unwrap() as usize;
             bytes.resize(size, 0);
             reader.read_exact(&mut bytes).unwrap();
-            nodes.push(postcard::from_bytes(&bytes).unwrap());
+            node_callback(postcard::from_bytes(&bytes).unwrap());
         }
 
-        (nodes, iters, nodes_touched)
+        SolverMetadata {
+            nodes,
+            iters,
+            nodes_touched,
+        }
     }
 
-    pub fn lookup(&mut self, board: &Board, history: &[Action]) -> Actions {
+    fn read_checkpoint(reader: impl Read) -> (Vec<BettingNode>, usize, u64) {
+        let mut nodes = vec![];
+        let metadata = Self::stream_checkpoint(reader, |node| {
+            nodes.push(node);
+        });
+
+        (nodes, metadata.iters, metadata.nodes_touched)
+    }
+
+    pub fn lookup(&self, board: &Board, history: &[Action]) -> Actions {
         let mut node = 0;
 
         for action in history.iter() {
