@@ -133,6 +133,12 @@ fn ui(args: Vec<String>) {
                     let filename = parts[2];
                     cfr_solve(filename, path, usize::MAX);
                 }
+                "export" => {
+                    let path = parts[1];
+                    let filename = parts[2];
+                    let out = parts[3];
+                    InferenceSolver::write_mmap(filename, out, try_load(&LATEST, path));
+                }
                 _ => {
                     println!("warn unknown cfr command {}", parts[0]);
                 }

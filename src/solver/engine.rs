@@ -30,6 +30,10 @@ type Belief = Vec<(Board, f64)>;
 type BoardGroups = [[usize; Street::COUNT]; Player::COUNT];
 type Response = FxHashMap<(usize, usize), usize>;
 
+pub fn as_bytes<T: Copy>(v: &T) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(v as *const T as *const u8, size_of::<T>()) }
+}
+
 #[repr(C)]
 #[derive(Default, Clone, Copy, Serialize, Deserialize)]
 pub struct InfosetData {
@@ -221,7 +225,7 @@ pub struct BettingNode {
 
 pub struct Solver {
     // TODO: this can be reordered for perf
-    nodes: Vec<BettingNode>,
+    pub nodes: Vec<BettingNode>,
     street_groups: [Box<dyn Group>; Street::COUNT],
     card_history: usize,
     iters: usize,
@@ -806,6 +810,7 @@ impl Solver {
         encoder.write_all(&nodes_touched.to_le_bytes())?;
 
         for data in nodes {
+            // TODO: this is inefficient
             let raw = postcard::to_allocvec(data)
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
             encoder.write_all(&(raw.len() as u64).to_le_bytes())?;

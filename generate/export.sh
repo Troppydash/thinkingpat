@@ -1,0 +1,1 @@
+cargo run -r -- "cfr export ./data $2 ./builds/$1/inference.bin" "quit"

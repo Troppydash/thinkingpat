@@ -1,15 +1,20 @@
-use std::{fs::File, io::BufReader};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Write},
+};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{
     game::board::{Action, Board, Street},
     group::group::Group,
-    solver::engine::{Actions, EngineGroups, MAX_ACTIONS, Solver, read_u64},
+    solver::engine::{Actions, EngineGroups, MAX_ACTIONS, Solver, as_bytes, read_u64},
 };
 
 type Policy = [f32; MAX_ACTIONS];
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 struct InferenceNode {
     children: [usize; MAX_ACTIONS],
     policy_start: usize, // index into a Strategy list
@@ -17,8 +22,6 @@ struct InferenceNode {
 
 pub struct InferenceSolver {
     mmap: memmap2::Mmap,
-    nodes: usize,
-    policy_offset: usize,
     card_history: usize,
     street_groups: [Box<dyn Group>; Street::COUNT],
 }
@@ -42,63 +45,41 @@ impl InferenceSolver {
 
     const BUFFER_SIZE: usize = 64 * 1024;
 
-    pub fn load(filename: &str, groups: EngineGroups) -> Self {
-        let make_reader =
-            || BufReader::with_capacity(Self::BUFFER_SIZE, File::open(filename).unwrap());
+    /// Writes mmap-able file to disk
+    pub fn write_mmap(filename: &str, out: &str, groups: EngineGroups) {
+        let mut writer =
+            BufWriter::with_capacity(Self::BUFFER_SIZE, File::create_new(out).unwrap());
+        let solver = Solver::load(filename, groups);
 
-        // count nodes + policies
-        let (node_count, policy_count) = {
-            let reader = make_reader();
-            let mut policy_count = 0;
-            let metadata = Solver::stream_checkpoint(reader, |node| {
-                policy_count += node.policy.len();
-            });
-
-            (metadata.nodes, policy_count)
-        };
-
-        let policy_offset = node_count * size_of::<InferenceNode>();
-        let data_size = policy_offset + policy_count * size_of::<Policy>();
-
-        let mut mmap = memmap2::MmapMut::map_anon(data_size).unwrap();
-        let mut node_index = 0;
-        let mut policy_index = policy_offset;
-
-        let reader = make_reader();
-        let _ = Solver::stream_checkpoint(reader, |node| {
+        let nodes = solver.nodes.len();
+        let mut policy_start = nodes * size_of::<InferenceNode>();
+        for node in solver.nodes.iter() {
             let inference_node = InferenceNode {
                 children: node
                     .children
                     .iter()
-                    .map(|&n| n.unwrap_or(usize::MAX))
+                    .map(|c| c.unwrap_or(usize::MAX))
                     .collect::<Vec<usize>>()
                     .try_into()
                     .unwrap(),
-                policy_start: policy_index,
+                policy_start,
             };
+            policy_start += node.policy.len() * size_of::<Policy>();
 
-            unsafe {
-                let ptr = mmap.as_mut_ptr().add(node_index) as *mut InferenceNode;
-                ptr.write(inference_node);
+            writer.write_all(as_bytes(&inference_node)).unwrap();
+        }
 
-                // then policy
-                for data in node.policy {
-                    let policy = data.strategy_sum;
-                    let ptr = mmap.as_mut_ptr().add(policy_index) as *mut Policy;
-                    ptr.write(policy);
-                    policy_index += size_of::<Policy>();
-                }
+        for node in solver.nodes.iter() {
+            for policy in node.policy.iter() {
+                writer.write_all(as_bytes(&policy.strategy_sum)).unwrap();
             }
+        }
+    }
 
-            node_index += size_of::<InferenceNode>();
-        });
-
-        let mmap = mmap.make_read_only().unwrap();
-
+    pub fn load(filename: &str, groups: EngineGroups) -> Self {
+        let mmap = unsafe { memmap2::Mmap::map(&File::open(filename).unwrap()).unwrap() };
         Self {
             mmap,
-            nodes: node_count,
-            policy_offset,
             street_groups: groups.groups,
             card_history: groups.card_history,
         }
