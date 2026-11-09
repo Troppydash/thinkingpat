@@ -6,7 +6,10 @@ use std::str::FromStr;
 use rustyline::DefaultEditor;
 
 use crate::{
-    arena::Arena,
+    arena::{
+        simple::Arena,
+        ui::{ProgramArena, SolverProgram},
+    },
     bot::{
         bot::Bot,
         cfr::{Cfr, CfrSolver},
@@ -227,7 +230,23 @@ fn ui(args: Vec<String>) {
                 }
             },
             "arena" => {
-                todo!()
+                // arena path iters engine1_program:engine1_file engine2_program:engine2_file ...
+                let path = parts[0];
+                let iters: usize = parts[1].parse().unwrap();
+
+                let engines: Vec<SolverProgram> = parts[2..]
+                    .iter()
+                    .map(|&joined| {
+                        let [binary, filename] =
+                            joined.split(":").collect::<Vec<&str>>().try_into().unwrap();
+                        let mut program = SolverProgram::new(binary);
+                        program.load(path, filename);
+                        program
+                    })
+                    .collect();
+
+                let mut arena = ProgramArena::new(engines);
+                arena.play(iters);
             }
             _ => {
                 println!("warn unknown command {}", command);
