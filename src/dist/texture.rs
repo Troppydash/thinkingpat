@@ -90,6 +90,7 @@ fn river_equities(texture: CardSet) -> Vec<u16> {
     equities
 }
 
+// TODO: bin this as well and zstd compress
 #[derive(Serialize, Deserialize)]
 pub struct River {
     /// (hand, texture) index -> equity

@@ -810,7 +810,6 @@ impl Solver {
         encoder.write_all(&nodes_touched.to_le_bytes())?;
 
         for data in nodes {
-            // TODO: this is inefficient
             let raw = postcard::to_allocvec(data)
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
             encoder.write_all(&(raw.len() as u64).to_le_bytes())?;

@@ -31,3 +31,10 @@ https://www.desmos.com/calculator/z9bo4weu63
 - response_strength -1.64795 +- 0.03866 sb
 - 0.2606799999999989 +- 0.08007364903902123 against equity
 - 0.05345956873315552 +- 0.02294816761648628 against 11_04
+
+
+11_14
+- preflop: 196
+- flop: 196 600 = 120k
+- turn: 10 20 600 = 120k
+- river: 5 10 20 200 = 300k
